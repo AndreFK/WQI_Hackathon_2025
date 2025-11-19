@@ -54,7 +54,7 @@ evolved_state = hamiltonian.evolve_state(initial_state, time=1.0)
 ### Subradiance Collective Decay (Equation 4)
 
 The Hamiltonian from equation 4 is:
-**H = Σ_{j<k} (F_jk/2) * (X_j X_k + Y_j Y_k)**
+$$H = Σ_{j<k} (F_jk/2) * (X_j X_k + Y_j Y_k)$$
 
 where indices run over pairs: 01, 02, 03, 12, 13, 23, etc.
 
@@ -121,15 +121,15 @@ Main class for working with Pauli string Hamiltonians.
 - `simplify_graph()`: Simplify using ZX calculus rules
 - `compute_matrix(optimize=True)`: Get full matrix representation
 - `compute_eigenvalues(hermitian=True)`: Compute eigenvalues
-- `time_evolution(time, optimize=True)`: Compute exp(-iHt)
+- `time_evolution(time, optimize=True)`: Compute $exp(-iHt)$
 - `evolve_state(initial_state, time)`: Evolve a quantum state
-- `expectation_value(state)`: Compute <ψ|H|ψ>
+- `expectation_value(state)`: Compute $\langle ψ|H|ψ\rangle$
 
 ### Helper Functions
 
 - `generate_random_pauli_string(num_terms, num_qubits, ...)`: Generate random Pauli strings
 - `create_collective_decay_hamiltonian(num_atoms, decay_rate, detuning, F_matrix)`: Create subradiance Hamiltonian from equation 4
-- `compute_F_jk(positions, k0, decay_rate)`: Compute F_jk coupling coefficients from atom positions
+- `compute_F_jk(positions, k0, decay_rate)`: Compute $F_{jk}$ coupling coefficients from atom positions
 - `compute_subradiance_eigenvalues(...)`: Compute eigenvalues of the subradiance Hamiltonian (ZX calculus or numpy)
 - `compute_subradiance_eigenvalues_numpy(...)`: Compute eigenvalues using standard numpy approach
 - `compute_subradiance_hamiltonian_numpy(...)`: Construct Hamiltonian matrix directly using numpy
