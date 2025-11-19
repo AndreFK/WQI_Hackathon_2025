@@ -25,7 +25,7 @@ from typing import List, Tuple, Optional, Union
 import quimb.tensor as qtn
 import cotengra as ctg
 from pyzx.quimb import to_quimb_tensor
-
+from fractions import Fraction
 
 class PauliHamiltonianZX:
     """
@@ -117,14 +117,14 @@ class PauliHamiltonianZX:
                     # Y = S† Z S where S = X(π/2)
                     x_vertex_one = main_graph.add_vertex(
                         zx.VertexType.X, qubit=qubit_index, row=current_row, 
-                        phase=float(sp.pi/2)
+                        phase=Fraction(1, 2)
                     )
                     z_vertex = main_graph.add_vertex(
                         zx.VertexType.Z, qubit=qubit_index, row=current_row + 1
                     )
                     x_vertex_two = main_graph.add_vertex(
                         zx.VertexType.X, qubit=qubit_index, row=current_row + 2, 
-                        phase=float(-sp.pi/2)
+                        phase=Fraction(-1, 2)
                     )
                     
                     main_graph.add_edge((x_vertex_one, z_vertex))
