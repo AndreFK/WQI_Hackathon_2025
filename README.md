@@ -1,6 +1,6 @@
 # Pauli Hamiltonian ZX Calculus
 
-This package implements the method from **"How to Sum and Exponentiate Hamiltonians in ZX Calculus"** by Razin A. Shaikh, Quanlong Wang, and Richie Yeung for summing Pauli string Hamiltonians and computing time evolution using ZX calculus with W-states.
+This package is beginning to implement the method from **"How to Sum and Exponentiate Hamiltonians in ZX Calculus"** by Razin A. Shaikh, Quanlong Wang, and Richie Yeung for summing Pauli string Hamiltonians and computing time evolution using ZX calculus with W-states.
 
 ## Features
 
