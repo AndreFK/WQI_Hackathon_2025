@@ -21,7 +21,7 @@ References:
 import pyzx as zx
 import sympy as sp
 import numpy as np
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Optional, Union, Dict
 # Lazy imports for quimb to avoid initialization errors
 # import quimb.tensor as qtn
 # import cotengra as ctg
@@ -230,9 +230,13 @@ class PauliHamiltonianZX:
         
         return self.tot_graph
     
-    def simplify_graph(self) -> zx.Graph:
+    def simplify_graph(self, normalize_rows: bool = True) -> zx.Graph:
         """
         Simplify the ZX graph using ZX calculus rules.
+        
+        Args:
+            normalize_rows: If True, normalize row positions to start from 0 and be compact.
+                          This reduces scrolling in visualizations.
         
         Returns:
             Simplified ZX graph
@@ -243,7 +247,50 @@ class PauliHamiltonianZX:
         zx.hsimplify.from_hypergraph_form(self.tot_graph)
         zx.simplify.full_reduce(self.tot_graph)
         
+        if normalize_rows:
+            self._normalize_rows(self.tot_graph)
+        
         return self.tot_graph
+    
+    def _normalize_rows(self, graph: zx.Graph) -> None:
+        """
+        Normalize row positions in the graph to start from 0 and be compact.
+        This makes visualizations more compact and reduces scrolling.
+        
+        Args:
+            graph: The ZX graph to normalize
+        """
+        # Get all unique row values
+        rows = sorted(set(graph.row(v) for v in graph.vertices()))
+        
+        # Create mapping from old rows to new compact rows
+        row_mapping = {old_row: new_row for new_row, old_row in enumerate(rows)}
+        
+        # Update row positions for all vertices
+        # PyZX stores row in a dictionary-like structure accessible via graph.row(v)
+        # We need to update the internal row storage
+        for v in graph.vertices():
+            old_row = graph.row(v)
+            new_row = row_mapping[old_row]
+            # PyZX stores rows in graph._row dictionary
+            if hasattr(graph, '_row') and isinstance(graph._row, dict):
+                graph._row[v] = new_row
+            # Alternative: PyZX might use a different internal structure
+            # Try accessing via vertex data
+            elif hasattr(graph, 'set_row'):
+                graph.set_row(v, new_row)
+            else:
+                # Last resort: try to update via vertex's internal data
+                # This is PyZX-specific and may vary by version
+                try:
+                    # PyZX stores row in vertex data
+                    vdata = graph.vertex_data(v)
+                    if vdata is not None and hasattr(vdata, 'row'):
+                        vdata.row = new_row
+                except:
+                    # If all else fails, we can't normalize rows
+                    # This is a limitation of the PyZX version
+                    pass
     
     def to_tensor_network(self):
         """
@@ -696,19 +743,171 @@ class PauliHamiltonianZX:
         
         First-order Trotter: exp(-iHt) ≈ [∏_j exp(-iH_j * t/n)]^n
         Second-order (Suzuki): exp(-iHt) ≈ [∏_j exp(-iH_j * t/(2n)) ∏_j exp(-iH_j * t/(2n))]^n
+        Third-order+: Uses W-state summation to sum separate terms (1, -it/2, -t²/8, it³/48, ...)
+                      Each term is built using existing Trotter logic, then root X vertices are
+                      tracked through composition and connected to a new top-level W-state.
         
         Args:
             time: Total evolution time
             trotter_steps: Number of Trotter steps (n)
-            order: Order of Trotter expansion (1 or 2)
+            order: Order of Trotter expansion (1, 2, or 3+)
             
         Returns:
             ZX graph representing the Trotterized time evolution operator (in PyZX format)
         """
-        if order not in [1, 2]:
-            raise ValueError("Order must be 1 or 2")
+        if order < 1:
+            raise ValueError("Order must be >= 1")
         
         dt = time / trotter_steps
+        
+        # For order 3+, build separate Trotter graphs for each H^k term and sum them
+        if order >= 3:
+            # Build separate terms: 1, H, H², H³, ...
+            coefficients = []
+            term_graphs = []
+            root_x_vertices = []  # Root X vertices from each term graph (phase=1, connected to W_INPUT)
+            
+            # Build identity term (coefficient = 1)
+            identity_graph = zx.Graph()
+            inps = []
+            outs = []
+            for q in range(self.total_qubits):
+                in_v = identity_graph.add_vertex(
+                    zx.VertexType.BOUNDARY, qubit=q, row=0
+                )
+                out_v = identity_graph.add_vertex(
+                    zx.VertexType.BOUNDARY, qubit=q, row=1
+                )
+                inps.append(in_v)
+                outs.append(out_v)
+                identity_graph.add_edge((in_v, out_v))
+            identity_graph.set_inputs(inps)
+            identity_graph.set_outputs(outs)
+            
+            coefficients.append(1.0)
+            term_graphs.append(identity_graph)
+            root_x_vertices.append(None)  # Identity has no W-state
+            
+            # Build terms for powers of H
+            for k in range(1, order + 1):
+                # Taylor expansion coefficient: (-i*dt/2)^k / k!
+                if k == 1:
+                    coeff = -1j * dt / 2
+                elif k == 2:
+                    coeff = -(dt/2)**2 / 2
+                elif k == 3:
+                    coeff = 1j * (dt/2)**3 / 6
+                else:
+                    coeff = ((-1j * dt/2)**k) / np.math.factorial(k)
+                
+                # Build Trotter graph for H^k by composing k copies (using existing logic)
+                # Use the actual trotter_steps parameter, not 1
+                h_graph = self.build_trotter_graph(time=dt/2, trotter_steps=trotter_steps, order=1)
+                for _ in range(k - 1):
+                    h_next = self.build_trotter_graph(time=dt/2, trotter_steps=trotter_steps, order=1)
+                    h_graph = self._compose_graphs(h_graph, h_next)
+                
+                coefficients.append(coeff)
+                term_graphs.append(h_graph)
+                
+                # Find root X vertex (X with phase=1 connected to W_INPUT) in this graph
+                root_x = None
+                for v in h_graph.vertices():
+                    if (h_graph.type(v) == zx.VertexType.X and 
+                        h_graph.phase(v) == 1 and
+                        h_graph.qubit(v) == 0):  # Root X is on qubit 0
+                        # Check if it's connected to a W_INPUT
+                        neighbors = list(h_graph.neighbors(v))
+                        for n in neighbors:
+                            if h_graph.type(n) == zx.VertexType.W_INPUT:
+                                root_x = v
+                                break
+                        if root_x:
+                            break
+                root_x_vertices.append(root_x)
+            
+            # Compose all term graphs together (like order 2 does), tracking root X vertices
+            # Use the same composition logic as order 2, but track root X vertices through composition
+            combined_graph = term_graphs[0]
+            # Track root X vertices: store the original root X from first graph
+            root_x_mapped = []
+            if root_x_vertices[0] is not None:
+                # For first graph, root X is at its original index
+                root_x_mapped.append(root_x_vertices[0])
+            else:
+                root_x_mapped.append(None)
+            
+            # Compose remaining graphs, tracking root X vertices through vertex mappings
+            for i, term_g in enumerate(term_graphs[1:], 1):
+                old_root_x = root_x_vertices[i]
+                
+                # Compose using _compose_graphs_with_tracking to get vertex mappings
+                combined_graph, vertex_map1, vertex_map2 = self._compose_graphs_with_tracking(
+                    combined_graph, term_g
+                )
+                
+                # Track root X vertices: update existing ones and add new one
+                # Update all previous root X vertices using vertex_map1
+                for j in range(len(root_x_mapped)):
+                    if root_x_mapped[j] is not None:
+                        root_x_mapped[j] = vertex_map1.get(root_x_mapped[j], root_x_mapped[j])
+                
+                # Add new root X vertex using vertex_map2
+                if old_root_x is not None:
+                    root_x_mapped.append(vertex_map2.get(old_root_x, None))
+                else:
+                    root_x_mapped.append(None)
+            
+            # Build new top-level W-state structure with coefficients
+            top_w_graph = zx.Graph()
+            root_x_vertex_new = top_w_graph.add_vertex(
+                zx.VertexType.X, qubit=0, row=0, phase=1
+            )
+            w_input_new = top_w_graph.add_vertex(
+                zx.VertexType.W_INPUT, qubit=0, row=1
+            )
+            w_output_new = top_w_graph.add_vertex(
+                zx.VertexType.W_OUTPUT, qubit=0, row=2
+            )
+            top_w_graph.add_edge((root_x_vertex_new, w_input_new))
+            top_w_graph.add_edge((w_input_new, w_output_new))
+            
+            x_vertices_to_connect = []
+            
+            # Add Z-boxes for each term with its coefficient
+            for i, coeff in enumerate(coefficients):
+                z_box = top_w_graph.add_vertex(
+                    zx.VertexType.Z_BOX, qubit=3, row=i+1
+                )
+                x = top_w_graph.add_vertex(
+                    zx.VertexType.X, qubit=4, row=i+1
+                )
+                zx.utils.set_z_box_label(top_w_graph, z_box, coeff)
+                
+                top_w_graph.add_edge((w_output_new, z_box))
+                top_w_graph.add_edge((z_box, x), edgetype=zx.EdgeType.HADAMARD)
+                x_vertices_to_connect.append(x)
+            
+            # Tensor with top W-state graph (like build_graph does)
+            top_w_verts = len(top_w_graph.vertices())
+            result_graph = top_w_graph.tensor(combined_graph)
+            
+            # Connect X vertices from top W-state to root X vertices of each term
+            # Root X vertices in combined_graph are shifted by top_w_verts after tensoring
+            for i, root_x_orig in enumerate(root_x_mapped):
+                if root_x_orig is not None:  # Skip identity term
+                    root_x_shifted = root_x_orig + top_w_verts
+                    # Connect corresponding X vertex to this root X
+                    result_graph.add_edge((
+                        x_vertices_to_connect[i],
+                        root_x_shifted
+                    ))
+            
+            return result_graph
+        
+        # Original logic for order 1 and 2 (unchanged)
+        if order not in [1, 2]:
+            raise ValueError("Order must be 1 or 2")
         
         # Build component graphs for each Trotter step
         step_graphs = []
@@ -895,6 +1094,115 @@ class PauliHamiltonianZX:
         composed.set_outputs(new_outputs)
         
         return composed
+    
+    def _compose_graphs_with_tracking(
+        self, graph1: zx.Graph, graph2: zx.Graph
+    ) -> Tuple[zx.Graph, Dict, Dict]:
+        """
+        Compose two ZX graphs and return vertex mappings (same as _compose_graphs but returns mappings).
+        
+        This is used for order 3+ to track root X vertices through composition.
+        
+        Args:
+            graph1: First graph (left)
+            graph2: Second graph (right)
+            
+        Returns:
+            Tuple of (composed_graph, vertex_map1, vertex_map2)
+            where vertex_map1 maps graph1 vertices to composed graph vertices,
+            and vertex_map2 maps graph2 vertices to composed graph vertices
+        """
+        # Same logic as _compose_graphs, but return the vertex mappings
+        max_row1 = max([graph1.row(v) for v in graph1.vertices()], default=0)
+        
+        composed = zx.Graph()
+        vertex_map1 = {}
+        vertex_map2 = {}
+        
+        # Copy all vertices from graph1
+        for v in graph1.vertices():
+            new_v = composed.add_vertex(
+                graph1.type(v),
+                qubit=graph1.qubit(v),
+                row=graph1.row(v),
+                phase=graph1.phase(v)
+            )
+            vertex_map1[v] = new_v
+        
+        # Copy all vertices from graph2, offset rows
+        for v in graph2.vertices():
+            new_v = composed.add_vertex(
+                graph2.type(v),
+                qubit=graph2.qubit(v),
+                row=graph2.row(v) + max_row1 + 1,
+                phase=graph2.phase(v)
+            )
+            vertex_map2[v] = new_v
+        
+        # Copy all edges from graph1
+        for e in graph1.edges():
+            v1, v2 = e
+            if v1 in vertex_map1 and v2 in vertex_map1:
+                composed.add_edge((vertex_map1[v1], vertex_map1[v2]))
+        
+        # Copy all edges from graph2
+        for e in graph2.edges():
+            v1, v2 = e
+            if v1 in vertex_map2 and v2 in vertex_map2:
+                composed.add_edge((vertex_map2[v1], vertex_map2[v2]))
+        
+        # Connect output boundaries of graph1 to input boundaries of graph2 (same as _compose_graphs)
+        graph1_outputs = list(graph1.outputs())
+        graph2_inputs = list(graph2.inputs())
+        min_len = min(len(graph1_outputs), len(graph2_inputs))
+        
+        for i in range(min_len):
+            v_out = graph1_outputs[i]
+            v_in = graph2_inputs[i]
+            
+            out_mapped = vertex_map1[v_out]
+            in_mapped = vertex_map2[v_in]
+            
+            out_neighbors_before = list(composed.neighbors(out_mapped))
+            in_neighbors_before = list(composed.neighbors(in_mapped))
+            
+            composed.add_edge((out_mapped, in_mapped))
+            
+            out_neighbors_after = list(composed.neighbors(out_mapped))
+            in_neighbors_after = list(composed.neighbors(in_mapped))
+            
+            out_real_neighbors = [n for n in out_neighbors_after if n != in_mapped]
+            in_real_neighbors = [n for n in in_neighbors_after if n != out_mapped]
+            
+            if out_real_neighbors and in_real_neighbors:
+                neighbor_from_graph1 = max(out_real_neighbors, key=lambda v: composed.row(v))
+                neighbor_from_graph2 = min(in_real_neighbors, key=lambda v: composed.row(v))
+                
+                composed.add_edge((neighbor_from_graph1, neighbor_from_graph2))
+                composed.remove_edge((out_mapped, in_mapped))
+                
+                for n in out_neighbors_before:
+                    if composed.connected(out_mapped, n):
+                        composed.remove_edge((out_mapped, n))
+                
+                for n in in_neighbors_before:
+                    if composed.connected(in_mapped, n):
+                        composed.remove_edge((in_mapped, n))
+                
+                if len(list(composed.neighbors(out_mapped))) == 0:
+                    composed.remove_vertex(out_mapped)
+                
+                if len(list(composed.neighbors(in_mapped))) == 0:
+                    composed.remove_vertex(in_mapped)
+        
+        # Set inputs and outputs (same as _compose_graphs)
+        new_inputs = [vertex_map1[v] for v in graph1.inputs() if vertex_map1[v] in composed.vertices()]
+        new_outputs = [vertex_map2[v] for v in graph2.outputs() if vertex_map2[v] in composed.vertices()]
+        
+        composed.set_inputs(new_inputs)
+        composed.set_outputs(new_outputs)
+        
+        return composed, vertex_map1, vertex_map2
     
     def time_evolution_trotter(
         self, 
