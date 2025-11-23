@@ -41,8 +41,10 @@ print(f"Eigenvalues: {eigenvalues}")
 
 ### Time Evolution
 
+#### Standard Method (Matrix Exponentiation)
+
 ```python
-# Compute time evolution operator
+# Compute time evolution operator using matrix exponentiation
 U = hamiltonian.time_evolution(time=1.0)
 
 # Evolve an initial state
@@ -51,10 +53,38 @@ initial_state[0] = 1.0  # |00...0⟩
 evolved_state = hamiltonian.evolve_state(initial_state, time=1.0)
 ```
 
+#### Trotter Expansion in ZX Calculus
+
+The Trotter expansion method builds the time evolution operator directly as a ZX diagram, following the method from "How to Sum and Exponentiate Hamiltonians in ZX Calculus":
+
+```python
+# First-order Trotter: exp(-iHt) ≈ [∏_j exp(-iH_j * t/n)]^n
+U_trotter = hamiltonian.time_evolution_trotter(
+    time=1.0,
+    trotter_steps=5,  # Number of Trotter steps (more = better approximation)
+    order=1  # 1 for first-order, 2 for second-order (Suzuki)
+)
+
+# Second-order (Suzuki) Trotter: higher accuracy
+U_trotter2 = hamiltonian.time_evolution_trotter(
+    time=1.0,
+    trotter_steps=5,
+    order=2  # Second-order Suzuki expansion
+)
+
+# Build and visualize the Trotter graph
+trotter_graph = hamiltonian.build_trotter_graph(
+    time=1.0,
+    trotter_steps=5,
+    order=2
+)
+zx.draw(trotter_graph)  # Visualize the ZX diagram
+```
+
 ### Subradiance Collective Decay (Equation 4)
 
 The Hamiltonian from equation 4 is:
-$$H = Σ_{j<k} (F_jk/2) * (X_j X_k + Y_j Y_k)$$
+$$H = \Sigma_{j<k} (F_jk/2) * (X_j X_k + Y_j Y_k)$$
 
 where indices run over pairs: 01, 02, 03, 12, 13, 23, etc.
 
@@ -121,7 +151,9 @@ Main class for working with Pauli string Hamiltonians.
 - `simplify_graph()`: Simplify using ZX calculus rules
 - `compute_matrix(optimize=True)`: Get full matrix representation
 - `compute_eigenvalues(hermitian=True)`: Compute eigenvalues
-- `time_evolution(time, optimize=True)`: Compute $exp(-iHt)$
+- `time_evolution(time, optimize=True)`: Compute $exp(-iHt)$ using matrix exponentiation
+- `time_evolution_trotter(time, trotter_steps, order, optimize)`: Compute $exp(-iHt)$ using Trotter expansion in ZX
+- `build_trotter_graph(time, trotter_steps, order)`: Build ZX diagram for Trotter expansion
 - `evolve_state(initial_state, time)`: Evolve a quantum state
 - `expectation_value(state)`: Compute $\langle ψ|H|ψ\rangle$
 

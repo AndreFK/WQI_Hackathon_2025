@@ -17,18 +17,11 @@ from typing import Tuple, List
 import sys
 import os
 
-# Add the WQI_Hackathon_2025 directory to path to import ZXW functions
-wqi_path = os.path.join(os.path.dirname(__file__), 'WQI_Hackathon_2025')
-if os.path.exists(wqi_path):
-    sys.path.insert(0, wqi_path)
-    try:
-        from pauli_hamiltonian_zx import PauliHamiltonianZX, create_collective_decay_hamiltonian
-    except ImportError:
-        print("Warning: Could not import ZXW functions. ZXW method will not be available.")
-        PauliHamiltonianZX = None
-        create_collective_decay_hamiltonian = None
-else:
-    print("Warning: WQI_Hackathon_2025 directory not found. ZXW method will not be available.")
+# Import ZXW functions directly (we're already in the same directory)
+try:
+    from pauli_hamiltonian_zx import PauliHamiltonianZX, create_collective_decay_hamiltonian
+except ImportError:
+    print("Warning: Could not import ZXW functions. ZXW method will not be available.")
     PauliHamiltonianZX = None
     create_collective_decay_hamiltonian = None
 

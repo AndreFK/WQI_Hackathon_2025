@@ -1,1 +1,7 @@
 ignoretest.py
+simple_test_print.txt
+test_trotter_comprehensive.py
+test_trotter_connection.py
+__pycache__/cor_decay_zxw.cpython-312.pyc
+__pycache__/pauli_hamiltonian_zx.cpython-312.pyc
+__pycache__/pauli_hamiltonian_zx.cpython-314.pyc

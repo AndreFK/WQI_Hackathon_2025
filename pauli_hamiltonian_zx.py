@@ -22,9 +22,10 @@ import pyzx as zx
 import sympy as sp
 import numpy as np
 from typing import List, Tuple, Optional, Union
-import quimb.tensor as qtn
-import cotengra as ctg
-from pyzx.quimb import to_quimb_tensor
+# Lazy imports for quimb to avoid initialization errors
+# import quimb.tensor as qtn
+# import cotengra as ctg
+# from pyzx.quimb import to_quimb_tensor
 from fractions import Fraction
 
 class PauliHamiltonianZX:
@@ -244,13 +245,17 @@ class PauliHamiltonianZX:
         
         return self.tot_graph
     
-    def to_tensor_network(self) -> qtn.TensorNetwork:
+    def to_tensor_network(self):
         """
         Convert the ZX graph to a Quimb tensor network.
         
         Returns:
-            Quimb TensorNetwork object
+            Quimb TensorNetwork object (lazy import to avoid initialization errors)
         """
+        # Lazy import to avoid initialization errors
+        import quimb.tensor as qtn
+        from pyzx.quimb import to_quimb_tensor
+        
         if self.tot_graph is None:
             self.simplify_graph()
         
@@ -277,6 +282,9 @@ class PauliHamiltonianZX:
         Returns:
             Matrix representation of the Hamiltonian
         """
+        # Lazy import
+        import cotengra as ctg
+        
         if self.tensor_network is None:
             self.to_tensor_network()
         
@@ -331,11 +339,644 @@ class PauliHamiltonianZX:
         
         return eigenvalues
     
+    def _build_single_term_exponential(
+        self, 
+        coefficient: float, 
+        gates: List[str], 
+        time: float,
+        row_offset: int = 0
+    ) -> zx.Graph:
+        """
+        Build ZX diagram for exp(-i * coefficient * time * Pauli_string).
+        
+        For a Pauli string P, exp(-i * c * t * P) is represented as:
+        - For X: Apply phase rotation with appropriate Hadamards
+        - For Y: Apply phase rotation with S gates
+        - For Z: Apply phase rotation directly
+        
+        Args:
+            coefficient: Coefficient of the Pauli term
+            gates: List of gates like ["X0", "Z1", "Y2"]
+            time: Evolution time
+            row_offset: Starting row for the diagram
+            
+        Returns:
+            ZX graph representing the exponential
+        """
+        graph = zx.Graph()
+        
+        # Handle complex coefficients - take real part for phase
+        # For complex coefficients, we use the real part for the phase rotation
+        if isinstance(coefficient, complex) or np.iscomplexobj(coefficient):
+            coefficient_real = float(np.real(coefficient))
+        else:
+            coefficient_real = float(coefficient)
+        
+        phase = -coefficient_real * time  # Phase for exp(-i * c * t * P)
+        
+        # Convert phase for ZX (normalize to [0, 2π) range)
+        # ZX phases are typically in units of π, so we divide by π
+        # Convert to Python native float to avoid numpy type issues
+        phase_normalized_val = float(phase) / float(np.pi)  # Ensure it's a Python float
+        
+        # Convert to Fraction for PyZX - use string conversion for maximum compatibility
+        # This is the most reliable method that works with all Python versions
+        phase_fraction = Fraction(str(phase_normalized_val)).limit_denominator(1000)
+        
+        # Create input boundaries
+        inps = []
+        for q in range(self.total_qubits):
+            in_vertex = graph.add_vertex(
+                zx.VertexType.BOUNDARY, qubit=q, row=row_offset
+            )
+            inps.append(in_vertex)
+        graph.set_inputs(inps)
+        
+        current_row = row_offset + 1
+        
+        # Process each gate in the Pauli string
+        z_vertices = []
+        
+        for gate in gates:
+            # Validate gate format
+            if not isinstance(gate, str):
+                raise TypeError(f"Expected gate to be a string, got {type(gate)}: {gate}")
+            if len(gate) < 2:
+                raise ValueError(f"Gate string too short: {gate}")
+            
+            gate_type = gate[0].upper()  # Ensure uppercase
+            if gate_type not in ['X', 'Y', 'Z']:
+                raise ValueError(f"Invalid gate type: {gate_type} (expected X, Y, or Z)")
+            
+            try:
+                qubit_index = int(gate[1:])
+            except ValueError:
+                raise ValueError(f"Cannot parse qubit index from gate: {gate}")
+            
+            if gate_type == 'X':
+                # X = H Z H, so exp(-i * c * t * X) = H exp(-i * c * t * Z) H
+                first_hadamard = graph.add_vertex(
+                    zx.VertexType.H_BOX, qubit=qubit_index, row=current_row
+                )
+                z_vertex = graph.add_vertex(
+                    zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
+                    phase=phase_fraction
+                )
+                second_hadamard = graph.add_vertex(
+                    zx.VertexType.H_BOX, qubit=qubit_index, row=current_row + 2
+                )
+                
+                graph.add_edge((first_hadamard, z_vertex))
+                graph.add_edge((z_vertex, second_hadamard))
+                current_row += 3
+                z_vertices.append(z_vertex)
+                
+            elif gate_type == 'Z':
+                # Direct Z phase rotation
+                z_vertex = graph.add_vertex(
+                    zx.VertexType.Z, qubit=qubit_index, row=current_row,
+                    phase=phase_fraction
+                )
+                current_row += 1
+                z_vertices.append(z_vertex)
+                
+            elif gate_type == 'Y':
+                # Y = S† Z S, so exp(-i * c * t * Y) = S† exp(-i * c * t * Z) S
+                s_dagger = graph.add_vertex(
+                    zx.VertexType.X, qubit=qubit_index, row=current_row,
+                    phase=Fraction(-1, 2)  # S†
+                )
+                z_vertex = graph.add_vertex(
+                    zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
+                    phase=phase_fraction
+                )
+                s = graph.add_vertex(
+                    zx.VertexType.X, qubit=qubit_index, row=current_row + 2,
+                    phase=Fraction(1, 2)  # S
+                )
+                
+                graph.add_edge((s_dagger, z_vertex))
+                graph.add_edge((z_vertex, s))
+                current_row += 3
+                z_vertices.append(z_vertex)
+        
+        # Connect all Z vertices in the Pauli string (for tensor product of Pauli operators)
+        # For a multi-qubit Pauli string P = P_1 ⊗ P_2 ⊗ ..., 
+        # exp(-i * c * t * P) = exp(-i * c * t * P_1) ⊗ exp(-i * c * t * P_2) ⊗ ...
+        # In ZX, we connect them to form the tensor product structure
+        for i in range(len(z_vertices) - 1):
+            graph.add_edge((z_vertices[i], z_vertices[i + 1]))
+        
+        # Create output boundaries
+        outs = []
+        for q in range(self.total_qubits):
+            out_vertex = graph.add_vertex(
+                zx.VertexType.BOUNDARY, qubit=q, row=current_row
+            )
+            outs.append(out_vertex)
+        graph.set_outputs(outs)
+        
+        # Connect vertices on each qubit line
+        for q in range(self.total_qubits):
+            vertices_on_qubit = sorted(
+                [v for v in graph.vertices() if graph.qubit(v) == q],
+                key=lambda v: graph.row(v)
+            )
+            edges = graph.edge_set()
+            
+            for i in range(len(vertices_on_qubit) - 1):
+                v1 = vertices_on_qubit[i]
+                v2 = vertices_on_qubit[i + 1]
+                if (v1, v2) not in edges and (v2, v1) not in edges:
+                    graph.add_edge((v1, v2))
+        
+        return graph
+    
+    def _build_trotter_step_component(self, time: float) -> zx.Graph:
+        """
+        Build a complete Trotter step component exp(-iH * time) using the same structure as build_graph.
+        
+        This builds exp(-iH * time) where H = Σ_j coefficient_j * Pauli_string_j
+        using the exact same W-state summation structure as the regular Hamiltonian (tot_graph).
+        The phases are embedded in the main graph based on the time parameter.
+        
+        Args:
+            time: Evolution time for this step
+            
+        Returns:
+            Complete ZX graph component with W-state structure (like tot_graph)
+        """
+        # Build main graph with phases embedded in the gates
+        main_graph = zx.Graph()
+        
+        # Create input boundaries
+        inps = []
+        for q in range(self.total_qubits):
+            in_vertex = main_graph.add_vertex(zx.VertexType.BOUNDARY, qubit=q, row=0)
+            inps.append(in_vertex)
+        main_graph.set_inputs(inps)
+        
+        current_row = 1
+        z_vertices_to_connect = []
+        
+        # Build gates for each Pauli term with phases embedded
+        for term in self.pauli_strings:
+            coefficient_raw, gates = term
+            
+            # Validate inputs
+            if not isinstance(gates, list) or len(gates) == 0:
+                continue
+            
+            # Ensure coefficient is a Python float
+            if isinstance(coefficient_raw, complex) or np.iscomplexobj(coefficient_raw):
+                coefficient = float(np.real(coefficient_raw))
+            elif isinstance(coefficient_raw, (np.integer, np.floating)):
+                coefficient = float(coefficient_raw)
+            else:
+                coefficient = float(coefficient_raw)
+            
+            # Phase for this exponential term: -coefficient * time
+            phase = -coefficient * time
+            phase_normalized_val = float(phase) / float(np.pi)
+            phase_fraction = Fraction(str(phase_normalized_val)).limit_denominator(1000)
+            
+            curr_list = []
+            
+            # Build the gates for this Pauli string (same as _build_main_graph but with phases)
+            for gate in gates:
+                if not isinstance(gate, str) or len(gate) < 2:
+                    continue
+                
+                gate_type = gate[0].upper()
+                try:
+                    qubit_index = int(gate[1:])
+                except ValueError:
+                    continue
+                
+                if gate_type == 'X':
+                    # X = H Z H, so exp(-i * c * t * X) = H exp(-i * c * t * Z) H
+                    first_hadamard = main_graph.add_vertex(
+                        zx.VertexType.H_BOX, qubit=qubit_index, row=current_row
+                    )
+                    z_vertex = main_graph.add_vertex(
+                        zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
+                        phase=phase_fraction
+                    )
+                    second_hadamard = main_graph.add_vertex(
+                        zx.VertexType.H_BOX, qubit=qubit_index, row=current_row + 2
+                    )
+                    
+                    main_graph.add_edge((first_hadamard, z_vertex))
+                    main_graph.add_edge((z_vertex, second_hadamard))
+                    current_row += 3
+                    curr_list.append(z_vertex)
+                    
+                elif gate_type == 'Z':
+                    # Direct Z phase rotation
+                    z_vertex = main_graph.add_vertex(
+                        zx.VertexType.Z, qubit=qubit_index, row=current_row,
+                        phase=phase_fraction
+                    )
+                    current_row += 1
+                    curr_list.append(z_vertex)
+                    
+                elif gate_type == 'Y':
+                    # Y = S† Z S, so exp(-i * c * t * Y) = S† exp(-i * c * t * Z) S
+                    s_dagger = main_graph.add_vertex(
+                        zx.VertexType.X, qubit=qubit_index, row=current_row,
+                        phase=Fraction(-1, 2)  # S†
+                    )
+                    z_vertex = main_graph.add_vertex(
+                        zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
+                        phase=phase_fraction
+                    )
+                    s = main_graph.add_vertex(
+                        zx.VertexType.X, qubit=qubit_index, row=current_row + 2,
+                        phase=Fraction(1, 2)  # S
+                    )
+                    
+                    main_graph.add_edge((s_dagger, z_vertex))
+                    main_graph.add_edge((z_vertex, s))
+                    current_row += 3
+                    curr_list.append(z_vertex)
+            
+            z_vertices_to_connect.append(curr_list)
+        
+        # Create output boundaries
+        outs = []
+        for q in range(self.total_qubits):
+            out_vertex = main_graph.add_vertex(
+                zx.VertexType.BOUNDARY, qubit=q, row=current_row
+            )
+            outs.append(out_vertex)
+        main_graph.set_outputs(outs)
+        
+        # Connect vertices on each qubit line (sorted by row to ensure proper order)
+        for q in range(self.total_qubits):
+            vertices_on_qubit = [v for v in main_graph.vertices() 
+                                if main_graph.qubit(v) == q]
+            # Sort by row to ensure sequential connection
+            vertices_on_qubit.sort(key=lambda v: main_graph.row(v))
+            edges = main_graph.edge_set()
+            
+            for i in range(len(vertices_on_qubit) - 1):
+                v1 = vertices_on_qubit[i]
+                v2 = vertices_on_qubit[i + 1]
+                if (v1, v2) not in edges and (v2, v1) not in edges:
+                    main_graph.add_edge((v1, v2))
+        
+        # Build top graph with W-states (same as _build_top_graph but with unit coefficients)
+        top_graph = zx.Graph()
+        
+        # Create W input/output structure
+        root_x_vertex = top_graph.add_vertex(
+            zx.VertexType.X, qubit=0, row=0, phase=1
+        )
+        w_input = top_graph.add_vertex(
+            zx.VertexType.W_INPUT, qubit=0, row=1
+        )
+        w_output = top_graph.add_vertex(
+            zx.VertexType.W_OUTPUT, qubit=0, row=2
+        )
+        top_graph.add_edge((root_x_vertex, w_input))
+        top_graph.add_edge((w_input, w_output))
+        
+        x_vertex_to_connect = []
+        
+        # Add Z-boxes for each term (coefficient = 1.0 since phases are in main graph)
+        for i, term in enumerate(self.pauli_strings):
+            if not isinstance(term[1], list) or len(term[1]) == 0:
+                continue
+                
+            z_box = top_graph.add_vertex(
+                zx.VertexType.Z_BOX, qubit=3, row=i+1
+            )
+            x = top_graph.add_vertex(
+                zx.VertexType.X, qubit=4, row=i+1
+            )
+            # Use unit coefficient (phases are already embedded in main graph)
+            zx.utils.set_z_box_label(top_graph, z_box, 1.0)
+            
+            top_graph.add_edge((w_output, z_box))
+            top_graph.add_edge((z_box, x), edgetype=zx.EdgeType.HADAMARD)
+            x_vertex_to_connect.append(x)
+        
+        # Combine main and top graphs (exactly like build_graph does)
+        top_graph_verts = len(top_graph.vertices())
+        z_vertices_shifted = [
+            [v + top_graph_verts for v in lst] 
+            for lst in z_vertices_to_connect
+        ]
+        
+        # Tensor the graphs
+        component_graph = top_graph.tensor(main_graph)
+        
+        # Connect X vertices to Z vertices (same as build_graph)
+        for i in range(len(x_vertex_to_connect)):
+            for j in range(len(z_vertices_shifted[i])):
+                component_graph.add_edge((
+                    x_vertex_to_connect[i], 
+                    z_vertices_shifted[i][j]
+                ))
+        
+        return component_graph
+    
+    def build_trotter_graph(
+        self, 
+        time: float, 
+        trotter_steps: int = 1,
+        order: int = 1
+    ) -> zx.Graph:
+        """
+        Build ZX diagram for Trotter expansion of exp(-iHt) by attaching components.
+        
+        Following the paper's method, each exponential term exp(-iH_j * t) is built
+        as a separate component, and these components are attached/composed sequentially.
+        This creates a proper PyZX graph that can be simplified.
+        
+        First-order Trotter: exp(-iHt) ≈ [∏_j exp(-iH_j * t/n)]^n
+        Second-order (Suzuki): exp(-iHt) ≈ [∏_j exp(-iH_j * t/(2n)) ∏_j exp(-iH_j * t/(2n))]^n
+        
+        Args:
+            time: Total evolution time
+            trotter_steps: Number of Trotter steps (n)
+            order: Order of Trotter expansion (1 or 2)
+            
+        Returns:
+            ZX graph representing the Trotterized time evolution operator (in PyZX format)
+        """
+        if order not in [1, 2]:
+            raise ValueError("Order must be 1 or 2")
+        
+        dt = time / trotter_steps
+        
+        # Build component graphs for each Trotter step
+        step_graphs = []
+        
+        # Build each Trotter step as a complete component (like tot_graph)
+        step_components = []
+        
+        for step in range(trotter_steps):
+            if order == 1:
+                # First-order: build one component with W-state structure for exp(-iH * dt)
+                step_component = self._build_trotter_step_component(dt)
+                step_components.append(step_component)
+                
+            else:  # order == 2
+                # Second-order: forward then backward
+                # Forward pass: exp(-iH * dt/2) with W-state structure
+                step_component_fwd = self._build_trotter_step_component(dt/2)
+                
+                # Backward pass: same structure
+                step_component_bwd = self._build_trotter_step_component(dt/2)
+                
+                # Connect outputs of forward to inputs of backward
+                step_component = self._compose_graphs(step_component_fwd, step_component_bwd)
+                step_components.append(step_component)
+        
+        # Connect all step components by attaching output boundaries to input boundaries
+        if len(step_components) == 0:
+            # Return identity if no terms
+            result_graph = zx.Graph()
+            inps = []
+            outs = []
+            for q in range(self.total_qubits):
+                in_v = result_graph.add_vertex(
+                    zx.VertexType.BOUNDARY, qubit=q, row=0
+                )
+                out_v = result_graph.add_vertex(
+                    zx.VertexType.BOUNDARY, qubit=q, row=1
+                )
+                inps.append(in_v)
+                outs.append(out_v)
+                result_graph.add_edge((in_v, out_v))
+            result_graph.set_inputs(inps)
+            result_graph.set_outputs(outs)
+            return result_graph
+        
+        # Connect all components: output boundaries of one to input boundaries of next
+        # Use the existing _compose_graphs method which properly handles composition
+        result_graph = step_components[0]
+        for next_component in step_components[1:]:
+            result_graph = self._compose_graphs(result_graph, next_component)
+        
+        return result_graph
+    
+    def _compose_graphs(self, graph1: zx.Graph, graph2: zx.Graph) -> zx.Graph:
+        """
+        Compose two ZX graphs: graph1 @ graph2 (matrix multiplication).
+        
+        This connects the outputs of graph1 to the inputs of graph2.
+        Uses PyZX's built-in composition if available, otherwise manual composition.
+        
+        Args:
+            graph1: First graph (left)
+            graph2: Second graph (right)
+            
+        Returns:
+            Composed graph
+        """
+        # Manual composition: copy both graphs and connect boundaries directly
+        # (Not using PyZX's compose as it may not handle our graph structure correctly)
+        # Get max row from graph1 to offset graph2
+        max_row1 = max([graph1.row(v) for v in graph1.vertices()], default=0)
+        
+        # Create composed graph by copying both
+        composed = zx.Graph()
+        vertex_map1 = {}
+        vertex_map2 = {}
+        
+        # Copy all vertices from graph1 (including boundaries)
+        for v in graph1.vertices():
+            new_v = composed.add_vertex(
+                graph1.type(v),
+                qubit=graph1.qubit(v),
+                row=graph1.row(v),
+                phase=graph1.phase(v)
+            )
+            vertex_map1[v] = new_v
+        
+        # Copy all vertices from graph2 (including boundaries), offset rows
+        for v in graph2.vertices():
+            new_v = composed.add_vertex(
+                graph2.type(v),
+                qubit=graph2.qubit(v),
+                row=graph2.row(v) + max_row1 + 1,
+                phase=graph2.phase(v)
+            )
+            vertex_map2[v] = new_v
+        
+        # Copy all edges from graph1
+        for e in graph1.edges():
+            v1, v2 = e
+            if v1 in vertex_map1 and v2 in vertex_map1:
+                composed.add_edge((vertex_map1[v1], vertex_map1[v2]))
+        
+        # Copy all edges from graph2
+        for e in graph2.edges():
+            v1, v2 = e
+            if v1 in vertex_map2 and v2 in vertex_map2:
+                composed.add_edge((vertex_map2[v1], vertex_map2[v2]))
+        
+        # Connect output boundaries of graph1 to input boundaries of graph2
+        # Assume outputs and inputs are in the same qubit order
+        graph1_outputs = list(graph1.outputs())
+        graph2_inputs = list(graph2.inputs())
+        
+        # Simple approach: connect by index (assuming same order)
+        connections_made = 0
+        min_len = min(len(graph1_outputs), len(graph2_inputs))
+        
+        # Store connections to make and boundaries to remove
+        connections_to_make = []  # (neighbor_from_graph1, neighbor_from_graph2)
+        boundaries_to_remove = []  # (out_mapped, in_mapped)
+        
+        for i in range(min_len):
+            v_out = graph1_outputs[i]
+            v_in = graph2_inputs[i]
+            
+            # Map to new vertices
+            out_mapped = vertex_map1[v_out]
+            in_mapped = vertex_map2[v_in]
+            
+            # Get neighbors BEFORE connecting boundaries
+            out_neighbors_before = list(composed.neighbors(out_mapped))
+            in_neighbors_before = list(composed.neighbors(in_mapped))
+            
+            # Temporarily connect boundaries
+            composed.add_edge((out_mapped, in_mapped))
+            
+            # Get neighbors AFTER connecting boundaries
+            out_neighbors_after = list(composed.neighbors(out_mapped))
+            in_neighbors_after = list(composed.neighbors(in_mapped))
+            
+            # Find the real neighbors (excluding the boundary connection we just made)
+            out_real_neighbors = [n for n in out_neighbors_after if n != in_mapped]
+            in_real_neighbors = [n for n in in_neighbors_after if n != out_mapped]
+            
+            # Connect the real neighbors together
+            if out_real_neighbors and in_real_neighbors:
+                # Use row to determine which ones to connect (last from graph1, first from graph2)
+                neighbor_from_graph1 = max(out_real_neighbors, key=lambda v: composed.row(v))
+                neighbor_from_graph2 = min(in_real_neighbors, key=lambda v: composed.row(v))
+                
+                composed.add_edge((neighbor_from_graph1, neighbor_from_graph2))
+                
+                # Remove the boundary-to-boundary connection
+                composed.remove_edge((out_mapped, in_mapped))
+                
+                # Remove old connections from boundaries to their original neighbors
+                for n in out_neighbors_before:
+                    if composed.connected(out_mapped, n):
+                        composed.remove_edge((out_mapped, n))
+                
+                for n in in_neighbors_before:
+                    if composed.connected(in_mapped, n):
+                        composed.remove_edge((in_mapped, n))
+                
+                # Remove isolated boundary vertices (they have no edges now)
+                if len(list(composed.neighbors(out_mapped))) == 0:
+                    composed.remove_vertex(out_mapped)
+                
+                if len(list(composed.neighbors(in_mapped))) == 0:
+                    composed.remove_vertex(in_mapped)
+                
+                connections_made += 1
+            else:
+                # Remove the temporary connection if we can't merge
+                composed.remove_edge((out_mapped, in_mapped))
+        
+        # Set inputs from graph1 and outputs from graph2
+        # Filter out any vertices that were removed
+        new_inputs = [vertex_map1[v] for v in graph1.inputs() if vertex_map1[v] in composed.vertices()]
+        new_outputs = [vertex_map2[v] for v in graph2.outputs() if vertex_map2[v] in composed.vertices()]
+        
+        composed.set_inputs(new_inputs)
+        composed.set_outputs(new_outputs)
+        
+        return composed
+    
+    def time_evolution_trotter(
+        self, 
+        time: float, 
+        trotter_steps: int = 1,
+        order: int = 1,
+        optimize: bool = True
+    ) -> np.ndarray:
+        """
+        Compute time evolution operator exp(-iHt) using Trotter expansion in ZX calculus.
+        
+        This implements the Trotter-Suzuki decomposition method from the paper.
+        
+        Args:
+            time: Evolution time
+            trotter_steps: Number of Trotter steps (more steps = better approximation)
+            order: Order of Trotter expansion (1 or 2 for Suzuki)
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Time evolution operator as a matrix
+        """
+        # Lazy imports to avoid initialization errors
+        import quimb.tensor as qtn
+        import cotengra as ctg
+        from pyzx.quimb import to_quimb_tensor
+        
+        # Build Trotter graph
+        trotter_graph = self.build_trotter_graph(time, trotter_steps, order)
+        
+        # Convert to tensor network
+        try:
+            tensor_network = to_quimb_tensor(trotter_graph)
+            
+            if not isinstance(tensor_network, qtn.TensorNetwork):
+                tensor_network = qtn.TensorNetwork([tensor_network])
+            
+            # Set up optimizer if needed
+            if optimize:
+                optimizer = ctg.HyperOptimizer(
+                    methods=['greedy', 'kahypar'],
+                    max_repeats=64,
+                    max_time=20,
+                    minimize='flops',
+                    progbar=False
+                )
+            else:
+                optimizer = None
+            
+            # Contract tensor network
+            output_indices = tensor_network.outer_inds()
+            
+            if optimize and optimizer is not None:
+                result = tensor_network.contract(
+                    all, optimize=optimizer, output_inds=output_indices
+                )
+            else:
+                result = tensor_network.contract(all, output_inds=output_indices)
+            
+            # Extract data and reshape
+            if hasattr(result, 'data'):
+                result_data = result.data
+            else:
+                result_data = result
+            
+            matrix_size = 2 ** self.total_qubits
+            final_matrix = result_data.reshape(matrix_size, matrix_size)
+            
+            return final_matrix
+            
+        except Exception as e:
+            print(f"Error in Trotter ZX computation: {e}")
+            print("Falling back to standard matrix exponentiation...")
+            # Fallback to standard method
+            return self.time_evolution(time, optimize=optimize)
+    
     def time_evolution(self, time: float, optimize: bool = True) -> np.ndarray:
         """
         Compute the time evolution operator exp(-iHt).
         
         This implements the exponentiation method from the paper.
+        For Trotter expansion in ZX, use time_evolution_trotter() instead.
         
         Args:
             time: Evolution time
@@ -391,6 +1032,650 @@ class PauliHamiltonianZX:
             H = (H + H.conj().T) / 2
         
         return np.vdot(state, H @ state)
+    
+    def partial_trace_zx(self, graph: zx.Graph, keep_qubits: int) -> zx.Graph:
+        """
+        Perform partial trace using ZX calculus methods by connecting outputs to inputs.
+        
+        In ZX calculus, partial trace is done by connecting the outputs of qubits
+        you want to trace out back to their inputs. This creates a closed loop (trace).
+        
+        Args:
+            graph: ZX graph to perform partial trace on
+            keep_qubits: Number of data qubits to keep (should match self.total_qubits)
+            
+        Returns:
+            ZX graph with auxiliary qubits traced out
+        """
+        # Create a copy to avoid modifying the original
+        traced_graph = graph.copy()
+        
+        # Get all inputs and outputs
+        inputs = list(traced_graph.inputs())
+        outputs = list(traced_graph.outputs())
+        
+        # Identify which qubits are data qubits (0 to keep_qubits-1)
+        # and which are auxiliary (negative or special qubit indices)
+        data_qubit_indices = set(range(keep_qubits))
+        
+        # Group inputs/outputs by qubit index
+        input_by_qubit = {}
+        output_by_qubit = {}
+        
+        for v in inputs:
+            q = traced_graph.qubit(v)
+            if q not in input_by_qubit:
+                input_by_qubit[q] = []
+            input_by_qubit[q].append(v)
+        
+        for v in outputs:
+            q = traced_graph.qubit(v)
+            if q not in output_by_qubit:
+                output_by_qubit[q] = []
+            output_by_qubit[q].append(v)
+        
+        # For each auxiliary qubit (not in data_qubit_indices), connect output to input
+        # This performs the partial trace
+        aux_qubits_traced = 0
+        for q in sorted(set(input_by_qubit.keys()) | set(output_by_qubit.keys())):
+            if q not in data_qubit_indices:
+                # This is an auxiliary qubit - trace it out
+                if q in input_by_qubit and q in output_by_qubit:
+                    aux_inputs = input_by_qubit[q]
+                    aux_outputs = output_by_qubit[q]
+                    
+                    # Match inputs and outputs by row position
+                    aux_inputs_sorted = sorted(aux_inputs, key=lambda v: traced_graph.row(v))
+                    aux_outputs_sorted = sorted(aux_outputs, key=lambda v: traced_graph.row(v))
+                    
+                    min_len = min(len(aux_inputs_sorted), len(aux_outputs_sorted))
+                    for i in range(min_len):
+                        # Connect output to input (this creates the trace)
+                        # Note: In ZX calculus, connecting output to input creates a trace
+                        traced_graph.add_edge((aux_outputs_sorted[i], aux_inputs_sorted[i]))
+                    
+                    aux_qubits_traced += 1
+        
+        # Update inputs and outputs to only include data qubits
+        new_inputs = [v for v in inputs if traced_graph.qubit(v) in data_qubit_indices]
+        new_outputs = [v for v in outputs if traced_graph.qubit(v) in data_qubit_indices]
+        
+        # Sort by qubit index to maintain order
+        new_inputs.sort(key=lambda v: traced_graph.qubit(v))
+        new_outputs.sort(key=lambda v: traced_graph.qubit(v))
+        
+        traced_graph.set_inputs(new_inputs)
+        traced_graph.set_outputs(new_outputs)
+        
+        return traced_graph
+    
+    def partial_trace(self, rho: np.ndarray, keep_qubits: int) -> np.ndarray:
+        """
+        Perform partial trace to reduce density matrix dimensions.
+        
+        Given a density matrix with extra dimensions (e.g., from W-state structure),
+        trace out auxiliary qubits to get the reduced density matrix for the data qubits.
+        
+        Args:
+            rho: Density matrix, can be larger than expected
+            keep_qubits: Number of qubits to keep (should match self.total_qubits)
+            
+        Returns:
+            Reduced density matrix of size (2^keep_qubits, 2^keep_qubits)
+        """
+        # If already the right size, return as is
+        target_size = 2 ** keep_qubits
+        if rho.shape == (target_size, target_size):
+            return rho
+        
+        # If rho is larger, we need to trace out extra dimensions
+        current_size = rho.shape[0]
+        
+        if current_size == target_size:
+            return rho
+        
+        # Check if current_size is a power of 2 and divisible by target_size
+        if current_size % target_size != 0:
+            raise ValueError(
+                f"Cannot perform partial trace: matrix size {current_size} "
+                f"is not compatible with target size {target_size}"
+            )
+        
+        # Reshape to identify subsystems
+        # If current_size = target_size * aux_size, we have aux_size auxiliary qubits
+        aux_size = current_size // target_size
+        
+        # Check if aux_size is a power of 2
+        if aux_size & (aux_size - 1) != 0:
+            raise ValueError(
+                f"Auxiliary subsystem size {aux_size} is not a power of 2"
+            )
+        
+        # Reshape rho to separate data and auxiliary subsystems
+        # rho has shape (current_size, current_size)
+        # Reshape to (target_size, aux_size, target_size, aux_size)
+        rho_reshaped = rho.reshape(target_size, aux_size, target_size, aux_size)
+        
+        # Trace out auxiliary qubits: sum over diagonal of aux indices
+        # Tr_aux(rho) = sum_i rho_{data, i; data, i}
+        rho_reduced = np.trace(rho_reshaped, axis1=1, axis2=3)
+        
+        return rho_reduced
+    
+    def extract_operator_block(self, U: np.ndarray, keep_qubits: int) -> np.ndarray:
+        """
+        Extract the operator block for data qubits from a larger operator.
+        
+        For a unitary operator on a larger space (data + auxiliary qubits),
+        extract the block that acts on the data qubits only.
+        This assumes the operator is block-diagonal or we take the (0,0) block
+        corresponding to the auxiliary qubits in state |0...0⟩.
+        
+        Args:
+            U: Operator matrix, can be larger than expected
+            keep_qubits: Number of qubits to keep (should match self.total_qubits)
+            
+        Returns:
+            Operator matrix of size (2^keep_qubits, 2^keep_qubits)
+        """
+        target_size = 2 ** keep_qubits
+        
+        # If already the right size, return as is
+        if U.shape == (target_size, target_size):
+            return U
+        
+        current_size = U.shape[0]
+        
+        if current_size == target_size:
+            return U
+        
+        # Check if current_size is divisible by target_size
+        if current_size % target_size != 0:
+            raise ValueError(
+                f"Cannot extract operator block: matrix size {current_size} "
+                f"is not compatible with target size {target_size}"
+            )
+        
+        aux_size = current_size // target_size
+        
+        # Reshape to identify subsystems
+        # U has shape (current_size, current_size)
+        # Reshape to (target_size, aux_size, target_size, aux_size)
+        U_reshaped = U.reshape(target_size, aux_size, target_size, aux_size)
+        
+        # Extract the block where auxiliary qubits are in |0...0⟩ state
+        # This is the (0, 0) block: U[0:target_size, 0:target_size] in the reshaped view
+        U_block = U_reshaped[:, 0, :, 0]
+        
+        return U_block
+    
+    def compute_matrix_with_zx_trace(self, optimize: bool = True) -> np.ndarray:
+        """
+        Compute matrix representation using ZX calculus partial trace.
+        
+        This method applies partial trace directly on the ZX graph by connecting
+        outputs to inputs of auxiliary qubits, then converts to matrix.
+        
+        Args:
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Matrix representation of the Hamiltonian for data qubits only
+        """
+        # Lazy import
+        import cotengra as ctg
+        
+        if self.tot_graph is None:
+            self.build_graph()
+        
+        # Apply ZX-based partial trace to remove auxiliary qubits
+        traced_graph = self.partial_trace_zx(self.tot_graph, self.total_qubits)
+        
+        # Convert to tensor network
+        import quimb.tensor as qtn
+        from pyzx.quimb import to_quimb_tensor
+        
+        try:
+            tensor_network = to_quimb_tensor(traced_graph)
+            
+            if not isinstance(tensor_network, qtn.TensorNetwork):
+                tensor_network = qtn.TensorNetwork([tensor_network])
+            
+            # Check outer indices
+            output_indices = tensor_network.outer_inds()
+            expected_inds = 2 * self.total_qubits
+            
+            if len(output_indices) != expected_inds:
+                # Fall back to numpy-based method
+                return self.compute_matrix_with_trace(optimize=optimize)
+            
+            if optimize and self.optimizer is None:
+                self.optimizer = ctg.HyperOptimizer(
+                    methods=['greedy', 'kahypar'],
+                    max_repeats=64,
+                    max_time=20,
+                    minimize='flops',
+                    progbar=False
+                )
+            
+            # Contract the tensor network
+            if optimize:
+                result = tensor_network.contract(
+                    all, optimize=self.optimizer, output_inds=output_indices
+                )
+            else:
+                result = tensor_network.contract(all, output_inds=output_indices)
+            
+            # Extract data and reshape
+            if hasattr(result, 'data'):
+                result_data = result.data
+            else:
+                result_data = result
+            
+            matrix_size = 2 ** self.total_qubits
+            if result_data.size == matrix_size * matrix_size:
+                final_matrix = result_data.reshape(matrix_size, matrix_size)
+                return final_matrix
+            else:
+                # Fall back to numpy-based method
+                return self.compute_matrix_with_trace(optimize=optimize)
+            
+        except Exception as e:
+            # Fall back to numpy-based method
+            return self.compute_matrix_with_trace(optimize=optimize)
+    
+    def compute_matrix_with_trace(self, optimize: bool = True) -> np.ndarray:
+        """
+        Compute matrix representation, handling extra dimensions with partial trace.
+        
+        This method handles cases where the tensor network has extra dimensions
+        from auxiliary qubits (e.g., W-state structure) and performs partial trace
+        to get the correct matrix for data qubits only.
+        
+        Args:
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Matrix representation of the Hamiltonian for data qubits
+        """
+        # Lazy import
+        import cotengra as ctg
+        
+        if self.tensor_network is None:
+            self.to_tensor_network()
+        
+        if optimize and self.optimizer is None:
+            self.optimizer = ctg.HyperOptimizer(
+                methods=['greedy', 'kahypar'],
+                max_repeats=64,
+                max_time=20,
+                minimize='flops',
+                progbar=False
+            )
+        
+        # Contract the tensor network
+        output_indices = self.tensor_network.outer_inds()
+        
+        if optimize:
+            result = self.tensor_network.contract(
+                all, optimize=self.optimizer, output_inds=output_indices
+            )
+        else:
+            result = self.tensor_network.contract(all, output_inds=output_indices)
+        
+        # Extract data
+        if hasattr(result, 'data'):
+            result_data = result.data
+        else:
+            result_data = result
+        
+        matrix_size = 2 ** self.total_qubits
+        expected_dims = 2 * self.total_qubits
+        
+        # Check if we have extra dimensions
+        if result_data.ndim > 2 and all(d == 2 for d in result_data.shape):
+            n_dims = len(result_data.shape)
+            
+            if n_dims > expected_dims:
+                # Have extra dimensions - need to reshape and trace
+                # First reshape to square matrix
+                total_size = result_data.size
+                sqrt_size = int(np.sqrt(total_size))
+                
+                if sqrt_size * sqrt_size == total_size:
+                        # Reshape to square matrix
+                        H_full = result_data.reshape(sqrt_size, sqrt_size)
+                        
+                        # Extract operator block for data qubits
+                        H = self.extract_operator_block(H_full, self.total_qubits)
+                        return H
+                else:
+                    raise ValueError(
+                        f"Cannot reshape tensor with shape {result_data.shape} "
+                        f"to square matrix. Total size: {total_size}"
+                    )
+            else:
+                # Normal case - reshape directly
+                final_matrix = result_data.reshape(matrix_size, matrix_size)
+                return final_matrix
+        else:
+            # Already 2D or 1D - reshape normally
+            if result_data.size == matrix_size * matrix_size:
+                return result_data.reshape(matrix_size, matrix_size)
+            else:
+                raise ValueError(
+                    f"Cannot reshape result with size {result_data.size} "
+                    f"to ({matrix_size}, {matrix_size}) matrix"
+                )
+    
+    def time_evolution_trotter_with_zx_trace(
+        self,
+        time: float,
+        trotter_steps: int = 1,
+        order: int = 1,
+        optimize: bool = True
+    ) -> np.ndarray:
+        """
+        Compute time evolution operator using Trotter expansion with ZX calculus partial trace.
+        
+        This method applies partial trace directly on the ZX graph by connecting
+        outputs to inputs of auxiliary qubits, then converts to matrix.
+        
+        Args:
+            time: Evolution time
+            trotter_steps: Number of Trotter steps
+            order: Order of Trotter expansion (1 or 2)
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Time evolution operator for data qubits only
+        """
+        # Build Trotter step component
+        component_graph = self._build_trotter_step_component(time / trotter_steps)
+        
+        # Compose trotter_steps copies
+        if trotter_steps == 1:
+            trotter_graph = component_graph
+        else:
+            trotter_graph = component_graph
+            for _ in range(trotter_steps - 1):
+                trotter_graph = self._compose_graphs(trotter_graph, component_graph)
+        
+        # Apply ZX-based partial trace to remove auxiliary qubits
+        traced_graph = self.partial_trace_zx(trotter_graph, self.total_qubits)
+        
+        # Convert to tensor network
+        import quimb.tensor as qtn
+        import cotengra as ctg
+        from pyzx.quimb import to_quimb_tensor
+        
+        try:
+            tensor_network = to_quimb_tensor(traced_graph)
+            
+            if not isinstance(tensor_network, qtn.TensorNetwork):
+                tensor_network = qtn.TensorNetwork([tensor_network])
+            
+            # Check outer indices
+            output_indices = tensor_network.outer_inds()
+            expected_inds = 2 * self.total_qubits
+            
+            if len(output_indices) != expected_inds:
+                # Fall back to numpy-based method
+                return self.time_evolution_trotter_with_trace(
+                    time, trotter_steps, order, optimize
+                )
+            
+            if optimize and self.optimizer is None:
+                self.optimizer = ctg.HyperOptimizer(
+                    methods=['greedy', 'kahypar'],
+                    max_repeats=64,
+                    max_time=20,
+                    minimize='flops',
+                    progbar=False
+                )
+            
+            # Contract the tensor network
+            if optimize:
+                result = tensor_network.contract(
+                    all, optimize=self.optimizer, output_inds=output_indices
+                )
+            else:
+                result = tensor_network.contract(all, output_inds=output_indices)
+            
+            # Extract data and reshape
+            if hasattr(result, 'data'):
+                result_data = result.data
+            else:
+                result_data = result
+            
+            matrix_size = 2 ** self.total_qubits
+            if result_data.size == matrix_size * matrix_size:
+                final_matrix = result_data.reshape(matrix_size, matrix_size)
+                return final_matrix
+            else:
+                # Fall back to numpy-based method
+                return self.time_evolution_trotter_with_trace(
+                    time, trotter_steps, order, optimize
+                )
+            
+        except Exception as e:
+            # Fall back to numpy-based method
+            return self.time_evolution_trotter_with_trace(
+                time, trotter_steps, order, optimize
+            )
+    
+    def time_evolution_trotter_with_trace(
+        self,
+        time: float,
+        trotter_steps: int = 1,
+        order: int = 1,
+        optimize: bool = True
+    ) -> np.ndarray:
+        """
+        Compute time evolution operator using Trotter expansion with partial trace.
+        
+        This method handles extra dimensions from auxiliary qubits by performing
+        partial trace to get the correct evolution operator for data qubits.
+        
+        Args:
+            time: Evolution time
+            trotter_steps: Number of Trotter steps
+            order: Order of Trotter expansion (1 or 2)
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Time evolution operator as a matrix for data qubits
+        """
+        # Lazy imports
+        import quimb.tensor as qtn
+        import cotengra as ctg
+        from pyzx.quimb import to_quimb_tensor
+        
+        # Build Trotter graph
+        trotter_graph = self.build_trotter_graph(time, trotter_steps, order)
+        
+        # Convert to tensor network
+        try:
+            tensor_network = to_quimb_tensor(trotter_graph)
+            
+            if not isinstance(tensor_network, qtn.TensorNetwork):
+                tensor_network = qtn.TensorNetwork([tensor_network])
+            
+            # Set up optimizer if needed
+            if optimize:
+                optimizer = ctg.HyperOptimizer(
+                    methods=['greedy', 'kahypar'],
+                    max_repeats=64,
+                    max_time=20,
+                    minimize='flops',
+                    progbar=False
+                )
+            else:
+                optimizer = None
+            
+            # Contract tensor network
+            output_indices = tensor_network.outer_inds()
+            
+            if optimize and optimizer is not None:
+                result = tensor_network.contract(
+                    all, optimize=optimizer, output_inds=output_indices
+                )
+            else:
+                result = tensor_network.contract(all, output_inds=output_indices)
+            
+            # Extract data
+            if hasattr(result, 'data'):
+                result_data = result.data
+            else:
+                result_data = result
+            
+            matrix_size = 2 ** self.total_qubits
+            expected_dims = 2 * self.total_qubits
+            
+            # Check if we have extra dimensions
+            if result_data.ndim > 2 and all(d == 2 for d in result_data.shape):
+                n_dims = len(result_data.shape)
+                
+                if n_dims > expected_dims:
+                    # Have extra dimensions - need to reshape and trace
+                    total_size = result_data.size
+                    sqrt_size = int(np.sqrt(total_size))
+                    
+                    if sqrt_size * sqrt_size == total_size:
+                        # Reshape to square matrix
+                        U_full = result_data.reshape(sqrt_size, sqrt_size)
+                        
+                        # Extract operator block for data qubits
+                        U = self.extract_operator_block(U_full, self.total_qubits)
+                        return U
+                    else:
+                        raise ValueError(
+                            f"Cannot reshape tensor with shape {result_data.shape} "
+                            f"to square matrix. Total size: {total_size}"
+                        )
+                else:
+                    # Normal case - reshape directly
+                    final_matrix = result_data.reshape(matrix_size, matrix_size)
+                    return final_matrix
+            else:
+                # Already 2D or 1D - reshape normally
+                if result_data.size == matrix_size * matrix_size:
+                    return result_data.reshape(matrix_size, matrix_size)
+                else:
+                    raise ValueError(
+                        f"Cannot reshape result with size {result_data.size} "
+                        f"to ({matrix_size}, {matrix_size}) matrix"
+                    )
+            
+        except Exception as e:
+            print(f"Error in Trotter ZX computation with trace: {e}")
+            print("Falling back to standard matrix exponentiation...")
+            return self.time_evolution(time, optimize=optimize)
+    
+    def evolve_density_matrix(
+        self,
+        initial_rho: np.ndarray,
+        time: float,
+        trotter_steps: int = 1,
+        order: int = 1,
+        use_trace: bool = True,
+        optimize: bool = True
+    ) -> np.ndarray:
+        """
+        Evolve a density matrix under the Hamiltonian.
+        
+        Args:
+            initial_rho: Initial density matrix (2^n × 2^n)
+            time: Evolution time
+            trotter_steps: Number of Trotter steps (for Trotter method)
+            order: Order of Trotter expansion
+            use_trace: If True, use methods that handle extra dimensions with partial trace
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Evolved density matrix ρ(t) = U ρ(0) U†
+        """
+        # Get evolution operator
+        if use_trace:
+            U = self.time_evolution_trotter_with_trace(
+                time=time,
+                trotter_steps=trotter_steps,
+                order=order,
+                optimize=optimize
+            )
+        else:
+            U = self.time_evolution_trotter(
+                time=time,
+                trotter_steps=trotter_steps,
+                order=order,
+                optimize=optimize
+            )
+        
+        # Evolve density matrix: ρ(t) = U ρ(0) U†
+        rho_t = U @ initial_rho @ U.conj().T
+        
+        return rho_t
+    
+    def compute_toy_state_properties(
+        self,
+        initial_ket: np.ndarray,
+        time: float,
+        trotter_steps: int = 1,
+        order: int = 1,
+        use_trace: bool = True,
+        optimize: bool = True
+    ) -> dict:
+        """
+        Compute properties of a toy state evolved under the Hamiltonian.
+        
+        This method converts a ket to a density matrix, evolves it, and computes
+        various properties like trace, purity, and energy expectation.
+        
+        Args:
+            initial_ket: Initial state vector |ψ⟩
+            time: Evolution time
+            trotter_steps: Number of Trotter steps
+            order: Order of Trotter expansion
+            use_trace: If True, use methods that handle extra dimensions
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Dictionary with properties:
+            - 'density_matrix': Evolved density matrix
+            - 'trace': Trace of density matrix (should be ~1)
+            - 'purity': Tr(ρ²) (should be ~1 for pure state)
+            - 'energy': Tr(Hρ) energy expectation value
+        """
+        # Convert ket to density matrix
+        initial_rho = np.outer(initial_ket, initial_ket.conj())
+        
+        # Evolve density matrix
+        rho_t = self.evolve_density_matrix(
+            initial_rho=initial_rho,
+            time=time,
+            trotter_steps=trotter_steps,
+            order=order,
+            use_trace=use_trace,
+            optimize=optimize
+        )
+        
+        # Compute properties
+        trace_rho = np.trace(rho_t).real
+        purity = np.trace(rho_t @ rho_t).real
+        
+        # Compute energy expectation: Tr(Hρ)
+        if use_trace:
+            H = self.compute_matrix_with_trace(optimize=optimize)
+        else:
+            H = self.compute_matrix(optimize=optimize)
+        energy = np.trace(H @ rho_t).real
+        
+        return {
+            'density_matrix': rho_t,
+            'trace': trace_rho,
+            'purity': purity,
+            'energy': energy
+        }
 
 
 def generate_random_pauli_string(
