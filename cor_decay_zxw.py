@@ -130,12 +130,12 @@ def compute_F_jk_equation5(
     """
     N=len(x)
     F = np.zeros((N, N), dtype=complex)
-    k_a = 2 * np.pi / lambda_val  # Wavevector magnitude
-    
+    k_a = 2 * np.pi / lambda_val  # Wavevector magnitude, may need to be a vector
+    omega_a = 2 * np.pi / lambda_val  # Angular frequency (not used here)
     for j in range(N):
         for k in range(j,N):
             if j == k:
-                F[j, k] = 3j*gam/2  # No self-coupling in off-diagonal part
+                F[j, k] = 1-1j*gam  # No self-coupling in off-diagonal part
             else:
                 # Compute distance components
                 dz = z[j] - z[k]
@@ -194,9 +194,13 @@ def create_equation4_hamiltonian(
     # For equation 4, we only include off-diagonal terms (j != k)
     # The decomposition is: (F_jk/2) * (X_j X_k - Y_j Y_k)
     for j in range(num_atoms):
-        for k in range(j, num_atoms):  
-            pauli_strings.append((F_matrix[j, k] / 2, [f"X{j}", f"X{k}"]))
-            pauli_strings.append((-F_matrix[k, j] / 2, [f"Y{j}", f"Y{k}"]))
+        for k in range(j, num_atoms):
+            if j != k:  
+                pauli_strings.append((F_matrix[j, k] / 2, [f"X{j}", f"X{k}"]))
+                pauli_strings.append((-F_matrix[k, j] / 2, [f"Y{j}", f"Y{k}"]))
+            else:
+                pauli_strings.append((F_matrix[j, k]/2, [f"Z{j}"]))  # Identity term for self-coupling
+                continue
     
     return pauli_strings
 
