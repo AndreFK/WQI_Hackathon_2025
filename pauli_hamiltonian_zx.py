@@ -41,8 +41,7 @@ class PauliHamiltonianZX:
         Initialize with a list of Pauli strings.
         
         Args:
-            pauli_strings: List of tuples (coefficient, [gate_list])
-                Example: [(0.5, ["X0", "X1"]), (-0.3, ["Y2", "Z3"])]
+            pauli_strings: Ex: [(0.5, ["X0", "X1"]), (-0.3, ["Y2", "Z3"])]
         """
         self.pauli_strings = pauli_strings
         self.total_qubits = self._compute_total_qubits()
@@ -51,6 +50,8 @@ class PauliHamiltonianZX:
         self.tot_graph = None
         self.tensor_network = None
         self.optimizer = None
+        self.x_input_vertex = None
+        self.zs = None
         
     def _compute_total_qubits(self) -> int:
         """Compute the total number of qubits needed."""
@@ -66,12 +67,11 @@ class PauliHamiltonianZX:
     def _build_main_graph(self) -> zx.Graph:
         """
         Build the main ZX graph representing the Pauli strings.
-        
         Returns:
             ZX graph with input/output boundaries
         """
         main_graph = zx.Graph()
-        
+        pi_over_2 = Fraction(1, 2)  # π/2 in ZX calculus
         # Create input boundaries
         inps = []
         for q in range(self.total_qubits):
@@ -81,59 +81,58 @@ class PauliHamiltonianZX:
         
         current_row = 1
         z_vertices_to_connect = []
-        
+        zs=[]
+        current_row = 1  # Start adding operations from row 1
+        z_vertices_to_connect = []
         for term in self.pauli_strings:
+            phase = term[0]
             gates = term[1]
             curr_list = []
-            
             for gate in gates:
                 gate_type = gate[0]
                 qubit_index = int(gate[1:])
                 
+                row_increment = 0
+                
                 if gate_type == 'X':
-                    # X = H Z H
-                    first_hadamard = main_graph.add_vertex(
-                        zx.VertexType.H_BOX, qubit=qubit_index, row=current_row
-                    )
-                    z_vertex = main_graph.add_vertex(
-                        zx.VertexType.Z, qubit=qubit_index, row=current_row + 1
-                    )
-                    second_hadamard = main_graph.add_vertex(
-                        zx.VertexType.H_BOX, qubit=qubit_index, row=current_row + 2
-                    )
-                    
+                    first_hadamard = main_graph.add_vertex(zx.VertexType.H_BOX, qubit=qubit_index, row=current_row)
+                    z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row + 1)
+                    second_hadamard = main_graph.add_vertex(zx.VertexType.H_BOX, qubit=qubit_index, row=current_row + 2)
+
                     main_graph.add_edge((first_hadamard, z_vertex))
                     main_graph.add_edge((z_vertex, second_hadamard))
-                    current_row += 3
-                    curr_list.append(z_vertex)
                     
+                    row_increment += 3
+                    
+                    curr_list.append(z_vertex)
                 elif gate_type == 'Z':
-                    z_vertex = main_graph.add_vertex(
-                        zx.VertexType.Z, qubit=qubit_index, row=current_row
-                    )
-                    current_row += 1
+                    z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row)
+                    row_increment += 1
+                    
                     curr_list.append(z_vertex)
-                    
                 elif gate_type == 'Y':
-                    # Y = S† Z S where S = X(π/2)
-                    x_vertex_one = main_graph.add_vertex(
-                        zx.VertexType.X, qubit=qubit_index, row=current_row, 
-                        phase=Fraction(1, 2)
-                    )
-                    z_vertex = main_graph.add_vertex(
-                        zx.VertexType.Z, qubit=qubit_index, row=current_row + 1
-                    )
-                    x_vertex_two = main_graph.add_vertex(
-                        zx.VertexType.X, qubit=qubit_index, row=current_row + 2, 
-                        phase=Fraction(-1, 2)
-                    )
-                    
+                    x_vertex_one = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row, phase=pi_over_2)
+                    z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row + 1)
+                    x_vertex_two = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row + 2, phase=pi_over_2)
+                
                     main_graph.add_edge((x_vertex_one, z_vertex))
                     main_graph.add_edge((z_vertex, x_vertex_two))
-                    current_row += 3
+                    
+                    row_increment += 3
+                    
                     curr_list.append(z_vertex)
-            
+                
+            corresponding_x = main_graph.add_vertex(zx.VertexType.X, qubit=-1, row=current_row)
+            corresponding_z = main_graph.add_vertex(zx.VertexType.Z_BOX, qubit=-2, row=current_row, phase=phase)
+            zx.utils.set_z_box_label(main_graph, corresponding_z, phase)
+            for z_vertex in curr_list:
+                main_graph.add_edge((corresponding_x, z_vertex))
+                main_graph.add_edge((corresponding_x, corresponding_z),edgetype=zx.EdgeType.HADAMARD)
+                
             z_vertices_to_connect.append(curr_list)
+            zs.append(corresponding_z)
+
+            current_row += row_increment
         
         # Create output boundaries
         outs = []
@@ -156,13 +155,78 @@ class PauliHamiltonianZX:
                 if (v1, v2) not in edges and (v2, v1) not in edges:
                     main_graph.add_edge((v1, v2))
         
+        
         self.z_vertices_to_connect = z_vertices_to_connect
-        return main_graph
+        self.zs = zs
+        for q in range(self.total_qubits):
+            #find all vertices for qubit q
+            vertices_on_qubit = [v for v in main_graph.vertices() if main_graph.qubit(v) == q]
+        edges = main_graph.edge_set()
     
+        # run through vertices and check wich are not connected
+        for i in range(len(vertices_on_qubit)):
+            v1 = vertices_on_qubit[i]
+            
+            if i+1 >= len(vertices_on_qubit):
+                break
+            
+            v2 = vertices_on_qubit[i+1]
+            if (v1, v2) not in edges and (v2, v1) not in edges:
+                main_graph.add_edge((v1, v2))
+
+        row_range = range(len(z_vertices_to_connect))
+        argsorted = np.argsort([z[0] for z in z_vertices_to_connect])
+        
+        row_range = [row_range[i] for i in argsorted]
+        
+        pauli_string_x_vertex = []
+        
+
+        h = list(main_graph.vertices())[-1]
+
+        top_zs = []
+        for x_v in pauli_string_x_vertex:
+            top_zs.append(main_graph.add_vertex(zx.VertexType.Z, qubit=main_graph.qubit(x_v)-1, row=main_graph.row(x_v)))
+        return main_graph
+    def build_trotter_graph(self, time: float, steps: int) -> zx.Graph:
+        """
+        Build the Trotterized ZX graph for time evolution.
+        
+        Args:
+            time: Evolution time
+        Returns:
+            ZX graph representing the Trotterized Hamiltonian
+        """
+        # Build the main graph first
+        if self.main_graph is None:
+            self.main_graph = self._build_main_graph()
+        
+        # Create the Trotterized graph
+        
+        # Add input boundaries
+        inps = []
+        appended_graph = None
+        
+        graphToAppend = self.main_graph.copy()
+        for z in self.zs:
+            graphToAppend.set_type(z, zx.VertexType.Z) 
+            graphToAppend.set_phase(z, graphToAppend.phase(z) * time / steps)  
+            print(graphToAppend.phase(z))
+            
+            # Build the single term exponential graph
+        
+        appended_graph = graphToAppend
+        for i in range(steps-1):
+            appended_graph = self._compose_graphs(graphToAppend, appended_graph)
+
+        # Add each Pauli term as a single term exponential
+        
+        
+        return appended_graph
+
     def _build_top_graph(self) -> Tuple[zx.Graph, List[int]]:
         """
         Build the top graph with W inputs/outputs and Z-boxes for coefficients.
-        
         Returns:
             Tuple of (top_graph, x_vertices_to_connect)
         """
@@ -197,47 +261,52 @@ class PauliHamiltonianZX:
             top_graph.add_edge((w_output, z_box))
             top_graph.add_edge((z_box, x), edgetype=zx.EdgeType.HADAMARD)
             x_vertex_to_connect.append(x)
-        
         return top_graph, x_vertex_to_connect
     
     def build_graph(self) -> zx.Graph:
         """
         Build the complete ZX graph by combining main and top graphs.
-        
         Returns:
             Complete ZX graph representing the Hamiltonian sum
         """
-        self.main_graph = self._build_main_graph()
-        self.top_graph, x_vertices_to_connect = self._build_top_graph()
+        if self.main_graph is None:
+            self.main_graph = self._build_main_graph()
         
-        # Shift indices for tensor product
-        top_graph_verts = len(self.top_graph.vertices())
-        z_vertices_to_connect = [
-            [v + top_graph_verts for v in lst] 
-            for lst in self.z_vertices_to_connect
-        ]
         
+        
+        top_graph = zx.Graph()
+        root_x_vertex = top_graph.add_vertex(
+            zx.VertexType.X, qubit=-3, row=1, phase=1
+        )
+        w_input = top_graph.add_vertex(
+            zx.VertexType.W_INPUT, qubit=-3, row=1
+        )
+        w_output = top_graph.add_vertex(
+            zx.VertexType.W_OUTPUT, qubit=-3, row=1
+        )
+        
+        top_graph.add_edge((root_x_vertex, w_input))
+        top_graph.add_edge((w_output, w_input))
         # Tensor the graphs
-        self.tot_graph = self.top_graph.tensor(self.main_graph)
-        
+        self.tot_graph =  top_graph @ self.main_graph
+        w_output = w_output
+        zx.draw(self.tot_graph)
         # Connect X vertices to Z vertices
-        for i in range(len(x_vertices_to_connect)):
-            for j in range(len(z_vertices_to_connect[i])):
-                self.tot_graph.add_edge((
-                    x_vertices_to_connect[i], 
-                    z_vertices_to_connect[i][j]
-                ))
-        
+        for z in self.zs:
+            z = z+top_graph.num_vertices()
+            self.tot_graph.add_edge((w_output, z))
+            
+        self.tot_graph.set_qubit(w_output, -3)
+        self.tot_graph.set_qubit(w_input, -4)
+        self.tot_graph.set_row(root_x_vertex, -5)
         return self.tot_graph
     
     def simplify_graph(self, normalize_rows: bool = True) -> zx.Graph:
         """
         Simplify the ZX graph using ZX calculus rules.
-        
         Args:
             normalize_rows: If True, normalize row positions to start from 0 and be compact.
                           This reduces scrolling in visualizations.
-        
         Returns:
             Simplified ZX graph
         """
@@ -249,7 +318,6 @@ class PauliHamiltonianZX:
         
         if normalize_rows:
             self._normalize_rows(self.tot_graph)
-        
         return self.tot_graph
     
     def _normalize_rows(self, graph: zx.Graph) -> None:
@@ -266,30 +334,25 @@ class PauliHamiltonianZX:
         # Create mapping from old rows to new compact rows
         row_mapping = {old_row: new_row for new_row, old_row in enumerate(rows)}
         
-        # Update row positions for all vertices
-        # PyZX stores row in a dictionary-like structure accessible via graph.row(v)
-        # We need to update the internal row storage
+        
         for v in graph.vertices():
             old_row = graph.row(v)
             new_row = row_mapping[old_row]
             # PyZX stores rows in graph._row dictionary
             if hasattr(graph, '_row') and isinstance(graph._row, dict):
                 graph._row[v] = new_row
-            # Alternative: PyZX might use a different internal structure
-            # Try accessing via vertex data
+           
             elif hasattr(graph, 'set_row'):
                 graph.set_row(v, new_row)
             else:
-                # Last resort: try to update via vertex's internal data
-                # This is PyZX-specific and may vary by version
+                
                 try:
                     # PyZX stores row in vertex data
                     vdata = graph.vertex_data(v)
                     if vdata is not None and hasattr(vdata, 'row'):
                         vdata.row = new_row
                 except:
-                    # If all else fails, we can't normalize rows
-                    # This is a limitation of the PyZX version
+                    
                     pass
     
     def to_tensor_network(self):
@@ -424,11 +487,11 @@ class PauliHamiltonianZX:
         # Convert phase for ZX (normalize to [0, 2π) range)
         # ZX phases are typically in units of π, so we divide by π
         # Convert to Python native float to avoid numpy type issues
-        phase_normalized_val = float(phase) / float(np.pi)  # Ensure it's a Python float
+        phase_normalized_val = float(float(phase) / float(np.pi))  # Ensure it's a Python float
         
         # Convert to Fraction for PyZX - use string conversion for maximum compatibility
         # This is the most reliable method that works with all Python versions
-        phase_fraction = Fraction(str(phase_normalized_val)).limit_denominator(1000)
+        phase_fraction = Fraction(str(phase_normalized_val))
         
         # Create input boundaries
         inps = []
@@ -538,429 +601,7 @@ class PauliHamiltonianZX:
                     graph.add_edge((v1, v2))
         
         return graph
-    
-    def _build_trotter_step_component(self, time: float) -> zx.Graph:
-        """
-        Build a complete Trotter step component exp(-iH * time) using the same structure as build_graph.
-        
-        This builds exp(-iH * time) where H = Σ_j coefficient_j * Pauli_string_j
-        using the exact same W-state summation structure as the regular Hamiltonian (tot_graph).
-        The phases are embedded in the main graph based on the time parameter.
-        
-        Args:
-            time: Evolution time for this step
-            
-        Returns:
-            Complete ZX graph component with W-state structure (like tot_graph)
-        """
-        # Build main graph with phases embedded in the gates
-        main_graph = zx.Graph()
-        
-        # Create input boundaries
-        inps = []
-        for q in range(self.total_qubits):
-            in_vertex = main_graph.add_vertex(zx.VertexType.BOUNDARY, qubit=q, row=0)
-            inps.append(in_vertex)
-        main_graph.set_inputs(inps)
-        
-        current_row = 1
-        z_vertices_to_connect = []
-        
-        # Build gates for each Pauli term with phases embedded
-        for term in self.pauli_strings:
-            coefficient_raw, gates = term
-            
-            # Validate inputs
-            if not isinstance(gates, list) or len(gates) == 0:
-                continue
-            
-            # Ensure coefficient is a Python float
-            if isinstance(coefficient_raw, complex) or np.iscomplexobj(coefficient_raw):
-                coefficient = float(np.real(coefficient_raw))
-            elif isinstance(coefficient_raw, (np.integer, np.floating)):
-                coefficient = float(coefficient_raw)
-            else:
-                coefficient = float(coefficient_raw)
-            
-            # Phase for this exponential term: -coefficient * time
-            phase = -coefficient * time
-            phase_normalized_val = float(phase) / float(np.pi)
-            phase_fraction = Fraction(str(phase_normalized_val)).limit_denominator(1000)
-            
-            curr_list = []
-            
-            # Build the gates for this Pauli string (same as _build_main_graph but with phases)
-            for gate in gates:
-                if not isinstance(gate, str) or len(gate) < 2:
-                    continue
-                
-                gate_type = gate[0].upper()
-                try:
-                    qubit_index = int(gate[1:])
-                except ValueError:
-                    continue
-                
-                if gate_type == 'X':
-                    # X = H Z H, so exp(-i * c * t * X) = H exp(-i * c * t * Z) H
-                    first_hadamard = main_graph.add_vertex(
-                        zx.VertexType.H_BOX, qubit=qubit_index, row=current_row
-                    )
-                    z_vertex = main_graph.add_vertex(
-                        zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
-                        phase=phase_fraction
-                    )
-                    second_hadamard = main_graph.add_vertex(
-                        zx.VertexType.H_BOX, qubit=qubit_index, row=current_row + 2
-                    )
-                    
-                    main_graph.add_edge((first_hadamard, z_vertex))
-                    main_graph.add_edge((z_vertex, second_hadamard))
-                    current_row += 3
-                    curr_list.append(z_vertex)
-                    
-                elif gate_type == 'Z':
-                    # Direct Z phase rotation
-                    z_vertex = main_graph.add_vertex(
-                        zx.VertexType.Z, qubit=qubit_index, row=current_row,
-                        phase=phase_fraction
-                    )
-                    current_row += 1
-                    curr_list.append(z_vertex)
-                    
-                elif gate_type == 'Y':
-                    # Y = S† Z S, so exp(-i * c * t * Y) = S† exp(-i * c * t * Z) S
-                    s_dagger = main_graph.add_vertex(
-                        zx.VertexType.X, qubit=qubit_index, row=current_row,
-                        phase=Fraction(-1, 2)  # S†
-                    )
-                    z_vertex = main_graph.add_vertex(
-                        zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
-                        phase=phase_fraction
-                    )
-                    s = main_graph.add_vertex(
-                        zx.VertexType.X, qubit=qubit_index, row=current_row + 2,
-                        phase=Fraction(1, 2)  # S
-                    )
-                    
-                    main_graph.add_edge((s_dagger, z_vertex))
-                    main_graph.add_edge((z_vertex, s))
-                    current_row += 3
-                    curr_list.append(z_vertex)
-            
-            z_vertices_to_connect.append(curr_list)
-        
-        # Create output boundaries
-        outs = []
-        for q in range(self.total_qubits):
-            out_vertex = main_graph.add_vertex(
-                zx.VertexType.BOUNDARY, qubit=q, row=current_row
-            )
-            outs.append(out_vertex)
-        main_graph.set_outputs(outs)
-        
-        # Connect vertices on each qubit line (sorted by row to ensure proper order)
-        for q in range(self.total_qubits):
-            vertices_on_qubit = [v for v in main_graph.vertices() 
-                                if main_graph.qubit(v) == q]
-            # Sort by row to ensure sequential connection
-            vertices_on_qubit.sort(key=lambda v: main_graph.row(v))
-            edges = main_graph.edge_set()
-            
-            for i in range(len(vertices_on_qubit) - 1):
-                v1 = vertices_on_qubit[i]
-                v2 = vertices_on_qubit[i + 1]
-                if (v1, v2) not in edges and (v2, v1) not in edges:
-                    main_graph.add_edge((v1, v2))
-        
-        # Build top graph with W-states (same as _build_top_graph but with unit coefficients)
-        top_graph = zx.Graph()
-        
-        # Create W input/output structure
-        root_x_vertex = top_graph.add_vertex(
-            zx.VertexType.X, qubit=0, row=0, phase=1
-        )
-        w_input = top_graph.add_vertex(
-            zx.VertexType.W_INPUT, qubit=0, row=1
-        )
-        w_output = top_graph.add_vertex(
-            zx.VertexType.W_OUTPUT, qubit=0, row=2
-        )
-        top_graph.add_edge((root_x_vertex, w_input))
-        top_graph.add_edge((w_input, w_output))
-        
-        x_vertex_to_connect = []
-        
-        # Add Z-boxes for each term (coefficient = 1.0 since phases are in main graph)
-        for i, term in enumerate(self.pauli_strings):
-            if not isinstance(term[1], list) or len(term[1]) == 0:
-                continue
-                
-            z_box = top_graph.add_vertex(
-                zx.VertexType.Z_BOX, qubit=3, row=i+1
-            )
-            x = top_graph.add_vertex(
-                zx.VertexType.X, qubit=4, row=i+1
-            )
-            # Use unit coefficient (phases are already embedded in main graph)
-            zx.utils.set_z_box_label(top_graph, z_box, 1.0)
-            
-            top_graph.add_edge((w_output, z_box))
-            top_graph.add_edge((z_box, x), edgetype=zx.EdgeType.HADAMARD)
-            x_vertex_to_connect.append(x)
-        
-        # Combine main and top graphs (exactly like build_graph does)
-        top_graph_verts = len(top_graph.vertices())
-        z_vertices_shifted = [
-            [v + top_graph_verts for v in lst] 
-            for lst in z_vertices_to_connect
-        ]
-        
-        # Tensor the graphs
-        component_graph = top_graph.tensor(main_graph)
-        
-        # Connect X vertices to Z vertices (same as build_graph)
-        for i in range(len(x_vertex_to_connect)):
-            for j in range(len(z_vertices_shifted[i])):
-                component_graph.add_edge((
-                    x_vertex_to_connect[i], 
-                    z_vertices_shifted[i][j]
-                ))
-        
-        return component_graph
-    
-    def build_trotter_graph(
-        self, 
-        time: float, 
-        trotter_steps: int = 1,
-        order: int = 1
-    ) -> zx.Graph:
-        """
-        Build ZX diagram for Trotter expansion of exp(-iHt) by attaching components.
-        
-        Following the paper's method, each exponential term exp(-iH_j * t) is built
-        as a separate component, and these components are attached/composed sequentially.
-        This creates a proper PyZX graph that can be simplified.
-        
-        First-order Trotter: exp(-iHt) ≈ [∏_j exp(-iH_j * t/n)]^n
-        Second-order (Suzuki): exp(-iHt) ≈ [∏_j exp(-iH_j * t/(2n)) ∏_j exp(-iH_j * t/(2n))]^n
-        Third-order+: Uses W-state summation to sum separate terms (1, -it/2, -t²/8, it³/48, ...)
-                      Each term is built using existing Trotter logic, then root X vertices are
-                      tracked through composition and connected to a new top-level W-state.
-        
-        Args:
-            time: Total evolution time
-            trotter_steps: Number of Trotter steps (n)
-            order: Order of Trotter expansion (1, 2, or 3+)
-            
-        Returns:
-            ZX graph representing the Trotterized time evolution operator (in PyZX format)
-        """
-        if order < 1:
-            raise ValueError("Order must be >= 1")
-        
-        dt = time / trotter_steps
-        
-        # For order 3+, build separate Trotter graphs for each H^k term and sum them
-        if order >= 3:
-            # Build separate terms: 1, H, H², H³, ...
-            coefficients = []
-            term_graphs = []
-            root_x_vertices = []  # Root X vertices from each term graph (phase=1, connected to W_INPUT)
-            
-            # Build identity term (coefficient = 1)
-            identity_graph = zx.Graph()
-            inps = []
-            outs = []
-            for q in range(self.total_qubits):
-                in_v = identity_graph.add_vertex(
-                    zx.VertexType.BOUNDARY, qubit=q, row=0
-                )
-                out_v = identity_graph.add_vertex(
-                    zx.VertexType.BOUNDARY, qubit=q, row=1
-                )
-                inps.append(in_v)
-                outs.append(out_v)
-                identity_graph.add_edge((in_v, out_v))
-            identity_graph.set_inputs(inps)
-            identity_graph.set_outputs(outs)
-            
-            coefficients.append(1.0)
-            term_graphs.append(identity_graph)
-            root_x_vertices.append(None)  # Identity has no W-state
-            
-            # Build terms for powers of H
-            for k in range(1, order + 1):
-                # Taylor expansion coefficient: (-i*dt/2)^k / k!
-                if k == 1:
-                    coeff = -1j * dt / 2
-                elif k == 2:
-                    coeff = -(dt/2)**2 / 2
-                elif k == 3:
-                    coeff = 1j * (dt/2)**3 / 6
-                else:
-                    coeff = ((-1j * dt/2)**k) / np.math.factorial(k)
-                
-                # Build Trotter graph for H^k by composing k copies (using existing logic)
-                # Use the actual trotter_steps parameter, not 1
-                h_graph = self.build_trotter_graph(time=dt/2, trotter_steps=trotter_steps, order=1)
-                for _ in range(k - 1):
-                    h_next = self.build_trotter_graph(time=dt/2, trotter_steps=trotter_steps, order=1)
-                    h_graph = self._compose_graphs(h_graph, h_next)
-                
-                coefficients.append(coeff)
-                term_graphs.append(h_graph)
-                
-                # Find root X vertex (X with phase=1 connected to W_INPUT) in this graph
-                root_x = None
-                for v in h_graph.vertices():
-                    if (h_graph.type(v) == zx.VertexType.X and 
-                        h_graph.phase(v) == 1 and
-                        h_graph.qubit(v) == 0):  # Root X is on qubit 0
-                        # Check if it's connected to a W_INPUT
-                        neighbors = list(h_graph.neighbors(v))
-                        for n in neighbors:
-                            if h_graph.type(n) == zx.VertexType.W_INPUT:
-                                root_x = v
-                                break
-                        if root_x:
-                            break
-                root_x_vertices.append(root_x)
-            
-            # Compose all term graphs together (like order 2 does), tracking root X vertices
-            # Use the same composition logic as order 2, but track root X vertices through composition
-            combined_graph = term_graphs[0]
-            # Track root X vertices: store the original root X from first graph
-            root_x_mapped = []
-            if root_x_vertices[0] is not None:
-                # For first graph, root X is at its original index
-                root_x_mapped.append(root_x_vertices[0])
-            else:
-                root_x_mapped.append(None)
-            
-            # Compose remaining graphs, tracking root X vertices through vertex mappings
-            for i, term_g in enumerate(term_graphs[1:], 1):
-                old_root_x = root_x_vertices[i]
-                
-                # Compose using _compose_graphs_with_tracking to get vertex mappings
-                combined_graph, vertex_map1, vertex_map2 = self._compose_graphs_with_tracking(
-                    combined_graph, term_g
-                )
-                
-                # Track root X vertices: update existing ones and add new one
-                # Update all previous root X vertices using vertex_map1
-                for j in range(len(root_x_mapped)):
-                    if root_x_mapped[j] is not None:
-                        root_x_mapped[j] = vertex_map1.get(root_x_mapped[j], root_x_mapped[j])
-                
-                # Add new root X vertex using vertex_map2
-                if old_root_x is not None:
-                    root_x_mapped.append(vertex_map2.get(old_root_x, None))
-                else:
-                    root_x_mapped.append(None)
-            
-            # Build new top-level W-state structure with coefficients
-            top_w_graph = zx.Graph()
-            root_x_vertex_new = top_w_graph.add_vertex(
-                zx.VertexType.X, qubit=0, row=0, phase=1
-            )
-            w_input_new = top_w_graph.add_vertex(
-                zx.VertexType.W_INPUT, qubit=0, row=1
-            )
-            w_output_new = top_w_graph.add_vertex(
-                zx.VertexType.W_OUTPUT, qubit=0, row=2
-            )
-            top_w_graph.add_edge((root_x_vertex_new, w_input_new))
-            top_w_graph.add_edge((w_input_new, w_output_new))
-            
-            x_vertices_to_connect = []
-            
-            # Add Z-boxes for each term with its coefficient
-            for i, coeff in enumerate(coefficients):
-                z_box = top_w_graph.add_vertex(
-                    zx.VertexType.Z_BOX, qubit=3, row=i+1
-                )
-                x = top_w_graph.add_vertex(
-                    zx.VertexType.X, qubit=4, row=i+1
-                )
-                zx.utils.set_z_box_label(top_w_graph, z_box, coeff)
-                
-                top_w_graph.add_edge((w_output_new, z_box))
-                top_w_graph.add_edge((z_box, x), edgetype=zx.EdgeType.HADAMARD)
-                x_vertices_to_connect.append(x)
-            
-            # Tensor with top W-state graph (like build_graph does)
-            top_w_verts = len(top_w_graph.vertices())
-            result_graph = top_w_graph.tensor(combined_graph)
-            
-            # Connect X vertices from top W-state to root X vertices of each term
-            # Root X vertices in combined_graph are shifted by top_w_verts after tensoring
-            for i, root_x_orig in enumerate(root_x_mapped):
-                if root_x_orig is not None:  # Skip identity term
-                    root_x_shifted = root_x_orig + top_w_verts
-                    # Connect corresponding X vertex to this root X
-                    result_graph.add_edge((
-                        x_vertices_to_connect[i],
-                        root_x_shifted
-                    ))
-            
-            return result_graph
-        
-        # Original logic for order 1 and 2 (unchanged)
-        if order not in [1, 2]:
-            raise ValueError("Order must be 1 or 2")
-        
-        # Build component graphs for each Trotter step
-        step_graphs = []
-        
-        # Build each Trotter step as a complete component (like tot_graph)
-        step_components = []
-        
-        for step in range(trotter_steps):
-            if order == 1:
-                # First-order: build one component with W-state structure for exp(-iH * dt)
-                step_component = self._build_trotter_step_component(dt)
-                step_components.append(step_component)
-                
-            else:  # order == 2
-                # Second-order: forward then backward
-                # Forward pass: exp(-iH * dt/2) with W-state structure
-                step_component_fwd = self._build_trotter_step_component(dt/2)
-                
-                # Backward pass: same structure
-                step_component_bwd = self._build_trotter_step_component(dt/2)
-                
-                # Connect outputs of forward to inputs of backward
-                step_component = self._compose_graphs(step_component_fwd, step_component_bwd)
-                step_components.append(step_component)
-        
-        # Connect all step components by attaching output boundaries to input boundaries
-        if len(step_components) == 0:
-            # Return identity if no terms
-            result_graph = zx.Graph()
-            inps = []
-            outs = []
-            for q in range(self.total_qubits):
-                in_v = result_graph.add_vertex(
-                    zx.VertexType.BOUNDARY, qubit=q, row=0
-                )
-                out_v = result_graph.add_vertex(
-                    zx.VertexType.BOUNDARY, qubit=q, row=1
-                )
-                inps.append(in_v)
-                outs.append(out_v)
-                result_graph.add_edge((in_v, out_v))
-            result_graph.set_inputs(inps)
-            result_graph.set_outputs(outs)
-            return result_graph
-        
-        # Connect all components: output boundaries of one to input boundaries of next
-        # Use the existing _compose_graphs method which properly handles composition
-        result_graph = step_components[0]
-        for next_component in step_components[1:]:
-            result_graph = self._compose_graphs(result_graph, next_component)
-        
-        return result_graph
-    
+
     def _compose_graphs(self, graph1: zx.Graph, graph2: zx.Graph) -> zx.Graph:
         """
         Compose two ZX graphs: graph1 @ graph2 (matrix multiplication).
@@ -975,9 +616,6 @@ class PauliHamiltonianZX:
         Returns:
             Composed graph
         """
-        # Manual composition: copy both graphs and connect boundaries directly
-        # (Not using PyZX's compose as it may not handle our graph structure correctly)
-        # Get max row from graph1 to offset graph2
         max_row1 = max([graph1.row(v) for v in graph1.vertices()], default=0)
         
         # Create composed graph by copying both
@@ -1018,7 +656,8 @@ class PauliHamiltonianZX:
                 composed.add_edge((vertex_map2[v1], vertex_map2[v2]))
         
         # Connect output boundaries of graph1 to input boundaries of graph2
-        # Assume outputs and inputs are in the same qubit order
+
+        #[TODO: ASSUMES OUTPUTS/INPUTS ARE IN SAME ORDER]
         graph1_outputs = list(graph1.outputs())
         graph2_inputs = list(graph2.inputs())
         
@@ -1026,9 +665,6 @@ class PauliHamiltonianZX:
         connections_made = 0
         min_len = min(len(graph1_outputs), len(graph2_inputs))
         
-        # Store connections to make and boundaries to remove
-        connections_to_make = []  # (neighbor_from_graph1, neighbor_from_graph2)
-        boundaries_to_remove = []  # (out_mapped, in_mapped)
         
         for i in range(min_len):
             v_out = graph1_outputs[i]
@@ -1085,14 +721,11 @@ class PauliHamiltonianZX:
                 # Remove the temporary connection if we can't merge
                 composed.remove_edge((out_mapped, in_mapped))
         
-        # Set inputs from graph1 and outputs from graph2
-        # Filter out any vertices that were removed
         new_inputs = [vertex_map1[v] for v in graph1.inputs() if vertex_map1[v] in composed.vertices()]
         new_outputs = [vertex_map2[v] for v in graph2.outputs() if vertex_map2[v] in composed.vertices()]
         
         composed.set_inputs(new_inputs)
         composed.set_outputs(new_outputs)
-        
         return composed
     
     def _compose_graphs_with_tracking(
@@ -1204,82 +837,7 @@ class PauliHamiltonianZX:
         
         return composed, vertex_map1, vertex_map2
     
-    def time_evolution_trotter(
-        self, 
-        time: float, 
-        trotter_steps: int = 1,
-        order: int = 1,
-        optimize: bool = True
-    ) -> np.ndarray:
-        """
-        Compute time evolution operator exp(-iHt) using Trotter expansion in ZX calculus.
-        
-        This implements the Trotter-Suzuki decomposition method from the paper.
-        
-        Args:
-            time: Evolution time
-            trotter_steps: Number of Trotter steps (more steps = better approximation)
-            order: Order of Trotter expansion (1 or 2 for Suzuki)
-            optimize: Whether to use cotengra optimization
-            
-        Returns:
-            Time evolution operator as a matrix
-        """
-        # Lazy imports to avoid initialization errors
-        import quimb.tensor as qtn
-        import cotengra as ctg
-        from pyzx.quimb import to_quimb_tensor
-        
-        # Build Trotter graph
-        trotter_graph = self.build_trotter_graph(time, trotter_steps, order)
-        
-        # Convert to tensor network
-        try:
-            tensor_network = to_quimb_tensor(trotter_graph)
-            
-            if not isinstance(tensor_network, qtn.TensorNetwork):
-                tensor_network = qtn.TensorNetwork([tensor_network])
-            
-            # Set up optimizer if needed
-            if optimize:
-                optimizer = ctg.HyperOptimizer(
-                    methods=['greedy', 'kahypar'],
-                    max_repeats=64,
-                    max_time=20,
-                    minimize='flops',
-                    progbar=False
-                )
-            else:
-                optimizer = None
-            
-            # Contract tensor network
-            output_indices = tensor_network.outer_inds()
-            
-            if optimize and optimizer is not None:
-                result = tensor_network.contract(
-                    all, optimize=optimizer, output_inds=output_indices
-                )
-            else:
-                result = tensor_network.contract(all, output_inds=output_indices)
-            
-            # Extract data and reshape
-            if hasattr(result, 'data'):
-                result_data = result.data
-            else:
-                result_data = result
-            
-            matrix_size = 2 ** self.total_qubits
-            final_matrix = result_data.reshape(matrix_size, matrix_size)
-            
-            return final_matrix
-            
-        except Exception as e:
-            print(f"Error in Trotter ZX computation: {e}")
-            print("Falling back to standard matrix exponentiation...")
-            # Fallback to standard method
-            return self.time_evolution(time, optimize=optimize)
-    
-    def time_evolution(self, time: float, optimize: bool = True) -> np.ndarray:
+    def time_evolution_numpy(self, time: float, optimize: bool = True) -> np.ndarray:
         """
         Compute the time evolution operator exp(-iHt).
         
