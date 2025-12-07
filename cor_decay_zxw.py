@@ -201,9 +201,18 @@ def create_equation4_hamiltonian(
     # For equation 4, we only include off-diagonal terms (j != k)
     # The decomposition is: (F_jk/2) * (X_j X_k - Y_j Y_k)
     for j in range(num_atoms):
-        for k in range(j, num_atoms):  
-            pauli_strings.append((F_matrix[j, k] / 2, [f"X{j}", f"X{k}"]))
-            pauli_strings.append((-F_matrix[k, j] / 2, [f"Y{j}", f"Y{k}"]))
+        for k in range(j + 1, num_atoms):  # j < k to avoid double counting and self-terms
+            F_jk = F_matrix[j, k]
+            
+            # Extract real part for the Pauli string decomposition
+            # The real part of F_jk gives the coupling strength
+            F_jk_real = F_jk.real
+            
+            if abs(F_jk_real) > 1e-12:
+                # Add (F_jk/2) * X_j X_k
+                pauli_strings.append((F_jk_real / 2, [f"X{j}", f"X{k}"]))
+                # Add -(F_jk/2) * Y_j Y_k (MINUS sign!)
+                pauli_strings.append((-F_jk_real / 2, [f"Y{j}", f"Y{k}"]))
     
     return pauli_strings
 
@@ -281,16 +290,15 @@ def setup_positions_2d_grid(N: int, m: float = 1.5, lambda_val: float = 1.0) -> 
     return x, y, z
 
 
-def compute_equation4_eigenvalues(
+def create_equation4_hamiltonian_zxw(
     x: np.ndarray,
     y: np.ndarray,
     z: np.ndarray,
     lambda_val: float,
-    gam: float,
-    use_zxw: bool = True
-) -> np.ndarray:
+    gam: float
+) -> 'PauliHamiltonianZX':
     """
-    Compute eigenvalues of the off-diagonal Hamiltonian from equation 4.
+    Create a ZXW Hamiltonian object for equation 4.
     
     Equation 4: Ĥ^jk = F_jk σ̂_+^j σ̂_-^k + F_kj σ̂_-^j σ̂_+^k
     Decomposes as: (F_jk/2) * (X_j X_k - Y_j Y_k)
@@ -301,36 +309,71 @@ def compute_equation4_eigenvalues(
         z: Array of z coordinates (N,)
         lambda_val: Wavelength
         gam: Decay rate Γ
-        use_zxw: If True, use ZXW method; if False, use direct numpy
         
     Returns:
-        Array of eigenvalues
+        PauliHamiltonianZX object ready for time evolution
     """
     N = len(x)
+    
+    if PauliHamiltonianZX is None:
+        raise ImportError("ZXW functions not available. Install required packages.")
     
     # Compute F_jk matrix using equation 5
     F_matrix = compute_F_jk_equation5(x, y, z, lambda_val, gam, N)
     
-    if use_zxw:
-        if PauliHamiltonianZX is None:
-            raise ImportError("ZXW functions not available. Install required packages.")
-        
-        # Create Pauli string Hamiltonian for equation 4
-        pauli_strings = create_equation4_hamiltonian(N, F_matrix)
-        
-        # Create ZXW Hamiltonian
-        hamiltonian_zxw = PauliHamiltonianZX(pauli_strings)
-        
-        # Compute eigenvalues
-        eigenvalues = hamiltonian_zxw.compute_eigenvalues(hermitian=True)
-    else:
-        # Direct numpy computation
-        # Build the Hamiltonian matrix directly
-        H = np.zeros((2**N, 2**N), dtype=complex)
-        
-        # This would require building the full 2^N dimensional matrix
-        # For now, we'll use ZXW method
-        raise NotImplementedError("Direct numpy method not implemented for equation 4. Use use_zxw=True.")
+    # Create Pauli string Hamiltonian for equation 4
+    pauli_strings = create_equation4_hamiltonian(N, F_matrix)
     
-    return eigenvalues
+    # Create and return ZXW Hamiltonian
+    return PauliHamiltonianZX(pauli_strings)
+
+
+def compute_equation4_time_evolution(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    lambda_val: float,
+    gam: float,
+    initial_state: np.ndarray,
+    times: np.ndarray,
+    n_trotter: int = 10,
+    use_tensor_network: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute time evolution of a state under the equation 4 Hamiltonian using Trotterization.
+    
+    Equation 4: Ĥ^jk = F_jk σ̂_+^j σ̂_-^k + F_kj σ̂_-^j σ̂_+^k
+    Decomposes as: (F_jk/2) * (X_j X_k - Y_j Y_k)
+    
+    Uses Trotterization: exp(-iHt) ≈ [exp(-iH₁t/n) exp(-iH₂t/n) ...]^n
+    
+    Args:
+        x: Array of x coordinates (N,)
+        y: Array of y coordinates (N,)
+        z: Array of z coordinates (N,)
+        lambda_val: Wavelength
+        gam: Decay rate Γ
+        initial_state: Initial quantum state vector (2^N,)
+        times: Array of time points to evaluate
+        n_trotter: Number of Trotter steps (higher = more accurate)
+        use_tensor_network: If True, use tensor network Trotterization
+        
+    Returns:
+        Tuple of (times, evolved_states) where evolved_states[i] is the state at times[i]
+    """
+    # Create the ZXW Hamiltonian
+    hamiltonian = create_equation4_hamiltonian_zxw(x, y, z, lambda_val, gam)
+    
+    # Evolve state at each time point using Trotterization
+    evolved_states = []
+    for t in times:
+        evolved_state = hamiltonian.evolve_state(
+            initial_state, 
+            t, 
+            n_trotter=n_trotter,
+            use_tensor_network=use_tensor_network
+        )
+        evolved_states.append(evolved_state)
+    
+    return times, np.array(evolved_states)
 

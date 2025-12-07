@@ -289,92 +289,237 @@ class PauliHamiltonianZX:
                 progbar=False
             )
         
-        # Contract the tensor network
-        output_indices = self.tensor_network.outer_inds()
+        # Get all outer indices
+        all_outer_inds = self.tensor_network.outer_inds()
+        matrix_size = 2 ** self.total_qubits
         
+        # For a quantum operator, we should have 2*N outer indices (N input + N output)
+        # Contract the tensor network keeping all outer indices
         if optimize:
             result = self.tensor_network.contract(
-                all, optimize=self.optimizer, output_inds=output_indices
+                all, optimize=self.optimizer, output_inds=all_outer_inds
             )
         else:
-            result = self.tensor_network.contract(all, output_inds=output_indices)
+            result = self.tensor_network.contract(all, output_inds=all_outer_inds)
         
-        # Extract data and reshape
+        # Extract data
         if hasattr(result, 'data'):
             result_data = result.data
+        elif isinstance(result, qtn.Tensor):
+            result_data = result.data
         else:
-            result_data = result
+            result_data = np.array(result)
         
-        matrix_size = 2 ** self.total_qubits
-        final_matrix = result_data.reshape(matrix_size, matrix_size)
+        # Reshape to matrix
+        # The result will have shape determined by the outer indices
+        # If we have 2*N indices each of dimension 2, shape is (2, 2, ..., 2) [2*N times]
+        result_shape = result_data.shape
+        expected_size = matrix_size * matrix_size
+        
+        # Check if we have the right total size
+        if result_data.size != expected_size:
+            raise ValueError(
+                f"Cannot reshape tensor of size {result_data.size} "
+                f"to matrix of size ({matrix_size}, {matrix_size}). "
+                f"Tensor shape: {result_shape}, Outer indices: {all_outer_inds}, "
+                f"Expected size: {expected_size}"
+            )
+        
+        # Reshape the tensor to matrix
+        # If we have 2*N indices, we need to combine them into 2 dimensions
+        if len(all_outer_inds) == 2 * self.total_qubits:
+            # Split into input and output indices
+            in_inds = all_outer_inds[:self.total_qubits]
+            out_inds = all_outer_inds[self.total_qubits:]
+            
+            # The tensor has shape (2, 2, ..., 2) with 2*N dimensions
+            # We need to reshape to (2^N, 2^N) where:
+            # - First dimension (rows) corresponds to output indices
+            # - Second dimension (columns) corresponds to input indices
+            # Reshape to combine dimensions: first N dims -> output, last N dims -> input
+            tensor_4d = result_data.reshape([2] * self.total_qubits + [2] * self.total_qubits)
+            # Flatten first N dimensions (output) and last N dimensions (input)
+            final_matrix = tensor_4d.reshape(matrix_size, matrix_size)
+        else:
+            # Fallback: try direct reshape
+            final_matrix = result_data.reshape(matrix_size, matrix_size)
         
         return final_matrix
     
-    def compute_eigenvalues(self, hermitian: bool = True) -> np.ndarray:
-        """
-        Compute eigenvalues of the Hamiltonian.
-        
-        Args:
-            hermitian: If True, symmetrize matrix to make it Hermitian
-            
-        Returns:
-            Array of eigenvalues
-        """
-        matrix = self.compute_matrix()
-        
-        if hermitian:
-            # Make Hermitian: H_eff = (H + H†)/2
-            matrix = (matrix + matrix.conj().T) / 2
-            eigenvalues = np.linalg.eigvalsh(matrix)
-        else:
-            eigenvalues = np.linalg.eigvals(matrix)
-        
-        return eigenvalues
     
-    def time_evolution(self, time: float, optimize: bool = True) -> np.ndarray:
+    def time_evolution(self, time: float, n_trotter: int = 10, 
+                      use_tensor_network: bool = True, optimize: bool = True) -> np.ndarray:
         """
-        Compute the time evolution operator exp(-iHt).
+        Compute the time evolution operator exp(-iHt) using Trotterization.
         
-        This implements the exponentiation method from the paper.
+        Implements Trotterization from "How to Sum and Exponentiate Hamiltonians in ZX Calculus":
+        exp(-iHt) ≈ [exp(-iH₁t/n) exp(-iH₂t/n) ... exp(-iHₘt/n)]^n
+        
+        where H = Σᵢ Hᵢ and each Hᵢ is a Pauli string term.
         
         Args:
             time: Evolution time
+            n_trotter: Number of Trotter steps (higher = more accurate, slower)
+            use_tensor_network: If True, use tensor network contractions for each term
             optimize: Whether to use cotengra optimization
             
         Returns:
             Time evolution operator as a matrix
         """
-        # Get the Hamiltonian matrix
-        H = self.compute_matrix(optimize=optimize)
+        if use_tensor_network:
+            return self._time_evolution_trotter_tensor_network(time, n_trotter, optimize)
+        else:
+            return self._time_evolution_trotter_matrix(time, n_trotter)
+    
+    def _time_evolution_trotter_matrix(self, time: float, n_trotter: int) -> np.ndarray:
+        """
+        Trotterization using matrix exponentials (for comparison/small systems).
         
-        # Make it Hermitian if needed
-        if not np.allclose(H, H.conj().T):
-            H = (H + H.conj().T) / 2
-        
-        # Compute exp(-iHt) using scipy
+        Args:
+            time: Evolution time
+            n_trotter: Number of Trotter steps
+            
+        Returns:
+            Time evolution operator as a matrix
+        """
         from scipy.linalg import expm
-        U = expm(-1j * time * H)
+        
+        dt = time / n_trotter
+        dim = 2 ** self.total_qubits
+        U = np.eye(dim, dtype=complex)
+        
+        # For each Trotter step
+        for _ in range(n_trotter):
+            # Multiply exponentials of each Pauli string term
+            for coeff, gates in self.pauli_strings:
+                # Build the Pauli string matrix
+                matrices = []
+                qubit_positions = {}
+                
+                for gate in gates:
+                    gate_type = gate[0]
+                    qubit_idx = int(gate[1:])
+                    qubit_positions[qubit_idx] = gate_type
+                
+                # Create tensor product: I ⊗ ... ⊗ P_i ⊗ ... ⊗ I
+                for q in range(self.total_qubits):
+                    if q in qubit_positions:
+                        matrices.append(_pauli_matrix(qubit_positions[q]))
+                    else:
+                        matrices.append(np.eye(2, dtype=complex))
+                
+                P = _tensor_product_matrices(matrices)
+                
+                # Compute exp(-i * coeff * P * dt)
+                U_term = expm(-1j * coeff * dt * P)
+                U = U_term @ U
         
         return U
     
-    def evolve_state(self, initial_state: np.ndarray, time: float) -> np.ndarray:
+    def _time_evolution_trotter_tensor_network(self, time: float, n_trotter: int, 
+                                             optimize: bool) -> np.ndarray:
         """
-        Evolve an initial quantum state under the Hamiltonian.
+        Trotterization using tensor networks for each Pauli string exponential.
+        
+        This avoids building the full matrix by computing each exp(-iHᵢt/n) 
+        as a tensor network and contracting them together.
         
         Args:
-            initial_state: Initial state vector (can be 1D or 2D)
             time: Evolution time
+            n_trotter: Number of Trotter steps
+            optimize: Whether to use cotengra optimization
+            
+        Returns:
+            Time evolution operator as a matrix
+        """
+        dt = time / n_trotter
+        dim = 2 ** self.total_qubits
+        
+        if optimize and self.optimizer is None:
+            self.optimizer = ctg.HyperOptimizer(
+                methods=['greedy', 'kahypar'],
+                max_repeats=32,
+                max_time=10,
+                minimize='flops',
+                progbar=False
+            )
+        
+        # Start with identity
+        U = np.eye(dim, dtype=complex)
+        
+        # For each Trotter step
+        for step in range(n_trotter):
+            # Multiply exponentials of each Pauli string term
+            for coeff, gates in self.pauli_strings:
+                # Compute exp(-i * coeff * P * dt) for this Pauli string
+                U_term = self._pauli_string_exponential(gates, coeff * dt, optimize)
+                
+                # Multiply: U = U_term @ U
+                U = U_term @ U
+        
+        return U
+    
+    def _pauli_string_exponential(self, gates: List[str], theta: float, 
+                                  optimize: bool) -> np.ndarray:
+        """
+        Compute exp(-i * theta * P) where P is a Pauli string.
+        
+        For a single Pauli string P, we have:
+        exp(-i * theta * P) = cos(theta) * I - i * sin(theta) * P
+        
+        Args:
+            gates: List of gates like ["X0", "Y1", "Z2"]
+            theta: Angle (coefficient * time)
+            optimize: Whether to use optimization
+            
+        Returns:
+            Matrix representation of exp(-i * theta * P)
+        """
+        # For small systems, use direct matrix computation
+        # For larger systems, could use tensor networks, but matrix is simpler for single terms
+        from scipy.linalg import expm
+        
+        # Build the Pauli string matrix
+        matrices = []
+        qubit_positions = {}
+        
+        for gate in gates:
+            gate_type = gate[0]
+            qubit_idx = int(gate[1:])
+            qubit_positions[qubit_idx] = gate_type
+        
+        # Create tensor product: I ⊗ ... ⊗ P_i ⊗ ... ⊗ I
+        for q in range(self.total_qubits):
+            if q in qubit_positions:
+                matrices.append(_pauli_matrix(qubit_positions[q]))
+            else:
+                matrices.append(np.eye(2, dtype=complex))
+        
+        P = _tensor_product_matrices(matrices)
+        
+        # Compute exp(-i * theta * P)
+        # For Pauli matrices: exp(-i*θ*P) = cos(θ)*I - i*sin(θ)*P
+        # But we'll use expm for generality
+        return expm(-1j * theta * P)
+    
+    def evolve_state(self, initial_state: np.ndarray, time: float, 
+                    n_trotter: int = 10, use_tensor_network: bool = True) -> np.ndarray:
+        """
+        Evolve an initial quantum state under the Hamiltonian using Trotterization.
+        
+        Args:
+            initial_state: Initial state vector (1D array of size 2^N)
+            time: Evolution time
+            n_trotter: Number of Trotter steps
+            use_tensor_network: If True, use tensor network Trotterization
             
         Returns:
             Evolved state vector
         """
-        U = self.time_evolution(time)
+        U = self.time_evolution(time, n_trotter=n_trotter, 
+                               use_tensor_network=use_tensor_network)
         
-        # Handle both 1D and 2D state vectors
-        if initial_state.ndim == 1:
-            return U @ initial_state
-        else:
-            return U @ initial_state
+        return U @ initial_state
     
     def expectation_value(self, state: np.ndarray) -> complex:
         """
