@@ -105,6 +105,7 @@ def compute_F_jk_equation5(
     z: np.ndarray,
     lambda_val: float,
     gam: float,
+    omega_prop= 10000.0
 ) -> np.ndarray:
     """
     Compute F_jk coupling matrix using equation 5 from paper 2408.
@@ -131,46 +132,42 @@ def compute_F_jk_equation5(
     N=len(x)
     F = np.zeros((N, N), dtype=complex)
     k_a = 2 * np.pi / lambda_val  # Wavevector magnitude, may need to be a vector
-    omega_a = 2 * np.pi / lambda_val  # Angular frequency (not used here)
+    omega_a = omega_prop/ gam  # Angular frequency (not used here)
+    omega_a = 0 #Only interested in decay part
     for j in range(N):
         for k in range(j,N):
-            if j == k:
-                F[j, k] = 1-1j*gam  # No self-coupling in off-diagonal part
-            else:
+            # if j == k:
+            #     F[j, k] = omega_a-1j*gam/2  # No self-coupling in off-diagonal part
+            if j != k:
                 # Compute distance components
                 dz = z[j] - z[k]
                 dy = y[j] - y[k]
                 dx = x[j] - x[k]
                 r_jk = np.sqrt(dx**2 + dy**2 + dz**2)
                 
-                if r_jk < 1e-10:
-                    F[j, k] = 0.0
-                else:
-                    # cos(θ_jk) is the cosine of angle between z-axis and separation vector
-                    cos_theta_jk = dz / r_jk
-                    k_a_r_jk = k_a * r_jk
+                
+                cos_theta_jk = dz / r_jk
+                k_a_r_jk = k_a * r_jk
                     
-                    sin_kr = np.sin(k_a_r_jk)
-                    cos_kr = np.cos(k_a_r_jk)
-                    
-                    # Handle k_a_r_jk = 0 case
-                    if abs(k_a_r_jk) < 1e-10:
-                        term1 = 0  # sin(kr)/(kr) → 1
-                        term2 = 3*1j /2  # (cos(kr)/(kr)² - sin(kr)/(kr)³) → 0
-                    else:
-                        term1 = (1 - cos_theta_jk**2) * (sin_kr / k_a_r_jk)
-                        term2 = (1 - 3 * cos_theta_jk**2) * (cos_kr / (k_a_r_jk**2) - sin_kr / (k_a_r_jk**3))
-                    
-                    # Equation 5: F_jk = - (i Γ / 2) (3/2) * (term1 + term2)
-                    F[j, k] = -(1j * gam / 2) * (3/2) * (term1 + term2)
-                    F[k, j] = F[j, k]  # F_jk = F_kj (symmetric)
-    
+                sin_kr = np.sin(k_a_r_jk)
+                cos_kr = np.cos(k_a_r_jk)
+                
+                # Handle k_a_r_jk = 0 case
+            
+                term1 = (1 - cos_theta_jk**2) * (sin_kr / k_a_r_jk)
+                term2 = (1 - 3 * cos_theta_jk**2) * (cos_kr / (k_a_r_jk**2) - sin_kr / (k_a_r_jk**3))
+                
+                # Equation 5: F_jk = - (i Γ / 2) (3/2) * (term1 + term2)
+                F[j, k] = -(1j * gam / 2) * (3/2) * (term1 + term2)
+                F[k, j] = F[j, k]  # F_jk = F_kj (symmetric)
+    F = F
     return F
 
 
 def create_equation4_hamiltonian(
     num_atoms: int,
-    F_matrix: np.ndarray
+    F_matrix: np.ndarray,
+    # gamma: float = 1.0
 ) -> List[Tuple[float, List[str]]]:
     """
     Create Hamiltonian for equation 4 from paper 2408 (off-diagonal part only).
@@ -196,12 +193,17 @@ def create_equation4_hamiltonian(
     for j in range(num_atoms):
         for k in range(j, num_atoms):
             if j != k:  
-                pauli_strings.append((F_matrix[j, k] / 2, [f"X{j}", f"X{k}"]))
-                pauli_strings.append((-F_matrix[k, j] / 2, [f"Y{j}", f"Y{k}"]))
-            else:
-                pauli_strings.append((F_matrix[j, k]/2, [f"Z{j}"]))  # Identity term for self-coupling
-                continue
+                f_jk = F_matrix[j, k]
+                #1/2 COMES From H_JK DECOMPOSITION of H_jk = F_jk sigma_
+                pauli_strings.append(( f_jk / 2, [f"X{j}", f"X{k}"])) 
+                pauli_strings.append((-f_jk/ 2, [f"Y{j}", f"Y{k}"]))
     
+    gamma_diag = -1j * 1.0 / 2  # Decay rate for diagonal terms
+    diag = []
+
+    for j in range(num_atoms):
+        diag.append(f"Z{j}")
+    pauli_strings.append((gamma_diag, diag))
     return pauli_strings
 
 
