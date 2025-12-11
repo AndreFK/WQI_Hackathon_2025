@@ -209,9 +209,11 @@ class PauliHamiltonianZX:
         
         graphToAppend = self.main_graph.copy()
         for z in self.zs:
-            graphToAppend.set_type(z, zx.VertexType.Z) 
-            graphToAppend.set_phase(z, graphToAppend.phase(z) * time / steps)  
-            print(graphToAppend.phase(z))
+            zx.utils.set_z_box_label(graphToAppend, z, 0)
+            graphToAppend.set_type(z, zx.VertexType.Z)
+            graphToAppend.set_phase(z, graphToAppend.phase(z) * time / (steps))
+
+            #print(graphToAppend.phase(z))
             
             # Build the single term exponential graph
         
@@ -290,7 +292,7 @@ class PauliHamiltonianZX:
         # Tensor the graphs
         self.tot_graph =  top_graph @ self.main_graph
         w_output = w_output
-        zx.draw(self.tot_graph)
+        # zx.draw(self.tot_graph)
         # Connect X vertices to Z vertices
         for z in self.zs:
             z = z+top_graph.num_vertices()
@@ -382,52 +384,6 @@ class PauliHamiltonianZX:
                 "Tensor too large. Reduce number of qubits or Pauli strings."
             )
     
-    def compute_matrix(self, optimize: bool = True) -> np.ndarray:
-        """
-        Compute the full matrix representation of the Hamiltonian.
-        
-        Args:
-            optimize: Whether to use cotengra optimization
-            
-        Returns:
-            Matrix representation of the Hamiltonian
-        """
-        # Lazy import
-        import cotengra as ctg
-        
-        if self.tensor_network is None:
-            self.to_tensor_network()
-        
-        if optimize and self.optimizer is None:
-            self.optimizer = ctg.HyperOptimizer(
-                methods=['greedy', 'kahypar'],
-                max_repeats=64,
-                max_time=20,
-                minimize='flops',
-                progbar=False
-            )
-        
-        # Contract the tensor network
-        output_indices = self.tensor_network.outer_inds()
-        
-        if optimize:
-            result = self.tensor_network.contract(
-                all, optimize=self.optimizer, output_inds=output_indices
-            )
-        else:
-            result = self.tensor_network.contract(all, output_inds=output_indices)
-        
-        # Extract data and reshape
-        if hasattr(result, 'data'):
-            result_data = result.data
-        else:
-            result_data = result
-        
-        matrix_size = 2 ** self.total_qubits
-        final_matrix = result_data.reshape(matrix_size, matrix_size)
-        
-        return final_matrix
-    
     def compute_eigenvalues(self, hermitian: bool = True) -> np.ndarray:
         """
         Compute eigenvalues of the Hamiltonian.
@@ -449,158 +405,7 @@ class PauliHamiltonianZX:
         
         return eigenvalues
     
-    def _build_single_term_exponential(
-        self, 
-        coefficient: float, 
-        gates: List[str], 
-        time: float,
-        row_offset: int = 0
-    ) -> zx.Graph:
-        """
-        Build ZX diagram for exp(-i * coefficient * time * Pauli_string).
-        
-        For a Pauli string P, exp(-i * c * t * P) is represented as:
-        - For X: Apply phase rotation with appropriate Hadamards
-        - For Y: Apply phase rotation with S gates
-        - For Z: Apply phase rotation directly
-        
-        Args:
-            coefficient: Coefficient of the Pauli term
-            gates: List of gates like ["X0", "Z1", "Y2"]
-            time: Evolution time
-            row_offset: Starting row for the diagram
-            
-        Returns:
-            ZX graph representing the exponential
-        """
-        graph = zx.Graph()
-        
-        # Handle complex coefficients - take real part for phase
-        # For complex coefficients, we use the real part for the phase rotation
-        if isinstance(coefficient, complex) or np.iscomplexobj(coefficient):
-            coefficient_real = float(np.real(coefficient))
-        else:
-            coefficient_real = float(coefficient)
-        
-        phase = -coefficient_real * time  # Phase for exp(-i * c * t * P)
-        
-        # Convert phase for ZX (normalize to [0, 2π) range)
-        # ZX phases are typically in units of π, so we divide by π
-        # Convert to Python native float to avoid numpy type issues
-        phase_normalized_val = float(float(phase) / float(np.pi))  # Ensure it's a Python float
-        
-        # Convert to Fraction for PyZX - use string conversion for maximum compatibility
-        # This is the most reliable method that works with all Python versions
-        phase_fraction = Fraction(str(phase_normalized_val))
-        
-        # Create input boundaries
-        inps = []
-        for q in range(self.total_qubits):
-            in_vertex = graph.add_vertex(
-                zx.VertexType.BOUNDARY, qubit=q, row=row_offset
-            )
-            inps.append(in_vertex)
-        graph.set_inputs(inps)
-        
-        current_row = row_offset + 1
-        
-        # Process each gate in the Pauli string
-        z_vertices = []
-        
-        for gate in gates:
-            # Validate gate format
-            if not isinstance(gate, str):
-                raise TypeError(f"Expected gate to be a string, got {type(gate)}: {gate}")
-            if len(gate) < 2:
-                raise ValueError(f"Gate string too short: {gate}")
-            
-            gate_type = gate[0].upper()  # Ensure uppercase
-            if gate_type not in ['X', 'Y', 'Z']:
-                raise ValueError(f"Invalid gate type: {gate_type} (expected X, Y, or Z)")
-            
-            try:
-                qubit_index = int(gate[1:])
-            except ValueError:
-                raise ValueError(f"Cannot parse qubit index from gate: {gate}")
-            
-            if gate_type == 'X':
-                # X = H Z H, so exp(-i * c * t * X) = H exp(-i * c * t * Z) H
-                first_hadamard = graph.add_vertex(
-                    zx.VertexType.H_BOX, qubit=qubit_index, row=current_row
-                )
-                z_vertex = graph.add_vertex(
-                    zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
-                    phase=phase_fraction
-                )
-                second_hadamard = graph.add_vertex(
-                    zx.VertexType.H_BOX, qubit=qubit_index, row=current_row + 2
-                )
-                
-                graph.add_edge((first_hadamard, z_vertex))
-                graph.add_edge((z_vertex, second_hadamard))
-                current_row += 3
-                z_vertices.append(z_vertex)
-                
-            elif gate_type == 'Z':
-                # Direct Z phase rotation
-                z_vertex = graph.add_vertex(
-                    zx.VertexType.Z, qubit=qubit_index, row=current_row,
-                    phase=phase_fraction
-                )
-                current_row += 1
-                z_vertices.append(z_vertex)
-                
-            elif gate_type == 'Y':
-                # Y = S† Z S, so exp(-i * c * t * Y) = S† exp(-i * c * t * Z) S
-                s_dagger = graph.add_vertex(
-                    zx.VertexType.X, qubit=qubit_index, row=current_row,
-                    phase=Fraction(-1, 2)  # S†
-                )
-                z_vertex = graph.add_vertex(
-                    zx.VertexType.Z, qubit=qubit_index, row=current_row + 1,
-                    phase=phase_fraction
-                )
-                s = graph.add_vertex(
-                    zx.VertexType.X, qubit=qubit_index, row=current_row + 2,
-                    phase=Fraction(1, 2)  # S
-                )
-                
-                graph.add_edge((s_dagger, z_vertex))
-                graph.add_edge((z_vertex, s))
-                current_row += 3
-                z_vertices.append(z_vertex)
-        
-        # Connect all Z vertices in the Pauli string (for tensor product of Pauli operators)
-        # For a multi-qubit Pauli string P = P_1 ⊗ P_2 ⊗ ..., 
-        # exp(-i * c * t * P) = exp(-i * c * t * P_1) ⊗ exp(-i * c * t * P_2) ⊗ ...
-        # In ZX, we connect them to form the tensor product structure
-        for i in range(len(z_vertices) - 1):
-            graph.add_edge((z_vertices[i], z_vertices[i + 1]))
-        
-        # Create output boundaries
-        outs = []
-        for q in range(self.total_qubits):
-            out_vertex = graph.add_vertex(
-                zx.VertexType.BOUNDARY, qubit=q, row=current_row
-            )
-            outs.append(out_vertex)
-        graph.set_outputs(outs)
-        
-        # Connect vertices on each qubit line
-        for q in range(self.total_qubits):
-            vertices_on_qubit = sorted(
-                [v for v in graph.vertices() if graph.qubit(v) == q],
-                key=lambda v: graph.row(v)
-            )
-            edges = graph.edge_set()
-            
-            for i in range(len(vertices_on_qubit) - 1):
-                v1 = vertices_on_qubit[i]
-                v2 = vertices_on_qubit[i + 1]
-                if (v1, v2) not in edges and (v2, v1) not in edges:
-                    graph.add_edge((v1, v2))
-        
-        return graph
+    
 
     def _compose_graphs(self, graph1: zx.Graph, graph2: zx.Graph) -> zx.Graph:
         """
@@ -1234,209 +1039,7 @@ class PauliHamiltonianZX:
                     f"to ({matrix_size}, {matrix_size}) matrix"
                 )
     
-    def time_evolution_trotter_with_zx_trace(
-        self,
-        time: float,
-        trotter_steps: int = 1,
-        order: int = 1,
-        optimize: bool = True
-    ) -> np.ndarray:
-        """
-        Compute time evolution operator using Trotter expansion with ZX calculus partial trace.
-        
-        This method applies partial trace directly on the ZX graph by connecting
-        outputs to inputs of auxiliary qubits, then converts to matrix.
-        
-        Args:
-            time: Evolution time
-            trotter_steps: Number of Trotter steps
-            order: Order of Trotter expansion (1 or 2)
-            optimize: Whether to use cotengra optimization
-            
-        Returns:
-            Time evolution operator for data qubits only
-        """
-        # Build Trotter step component
-        component_graph = self._build_trotter_step_component(time / trotter_steps)
-        
-        # Compose trotter_steps copies
-        if trotter_steps == 1:
-            trotter_graph = component_graph
-        else:
-            trotter_graph = component_graph
-            for _ in range(trotter_steps - 1):
-                trotter_graph = self._compose_graphs(trotter_graph, component_graph)
-        
-        # Apply ZX-based partial trace to remove auxiliary qubits
-        traced_graph = self.partial_trace_zx(trotter_graph, self.total_qubits)
-        
-        # Convert to tensor network
-        import quimb.tensor as qtn
-        import cotengra as ctg
-        from pyzx.quimb import to_quimb_tensor
-        
-        try:
-            tensor_network = to_quimb_tensor(traced_graph)
-            
-            if not isinstance(tensor_network, qtn.TensorNetwork):
-                tensor_network = qtn.TensorNetwork([tensor_network])
-            
-            # Check outer indices
-            output_indices = tensor_network.outer_inds()
-            expected_inds = 2 * self.total_qubits
-            
-            if len(output_indices) != expected_inds:
-                # Fall back to numpy-based method
-                return self.time_evolution_trotter_with_trace(
-                    time, trotter_steps, order, optimize
-                )
-            
-            if optimize and self.optimizer is None:
-                self.optimizer = ctg.HyperOptimizer(
-                    methods=['greedy', 'kahypar'],
-                    max_repeats=64,
-                    max_time=20,
-                    minimize='flops',
-                    progbar=False
-                )
-            
-            # Contract the tensor network
-            if optimize:
-                result = tensor_network.contract(
-                    all, optimize=self.optimizer, output_inds=output_indices
-                )
-            else:
-                result = tensor_network.contract(all, output_inds=output_indices)
-            
-            # Extract data and reshape
-            if hasattr(result, 'data'):
-                result_data = result.data
-            else:
-                result_data = result
-            
-            matrix_size = 2 ** self.total_qubits
-            if result_data.size == matrix_size * matrix_size:
-                final_matrix = result_data.reshape(matrix_size, matrix_size)
-                return final_matrix
-            else:
-                # Fall back to numpy-based method
-                return self.time_evolution_trotter_with_trace(
-                    time, trotter_steps, order, optimize
-                )
-            
-        except Exception as e:
-            # Fall back to numpy-based method
-            return self.time_evolution_trotter_with_trace(
-                time, trotter_steps, order, optimize
-            )
     
-    def time_evolution_trotter_with_trace(
-        self,
-        time: float,
-        trotter_steps: int = 1,
-        order: int = 1,
-        optimize: bool = True
-    ) -> np.ndarray:
-        """
-        Compute time evolution operator using Trotter expansion with partial trace.
-        
-        This method handles extra dimensions from auxiliary qubits by performing
-        partial trace to get the correct evolution operator for data qubits.
-        
-        Args:
-            time: Evolution time
-            trotter_steps: Number of Trotter steps
-            order: Order of Trotter expansion (1 or 2)
-            optimize: Whether to use cotengra optimization
-            
-        Returns:
-            Time evolution operator as a matrix for data qubits
-        """
-        # Lazy imports
-        import quimb.tensor as qtn
-        import cotengra as ctg
-        from pyzx.quimb import to_quimb_tensor
-        
-        # Build Trotter graph
-        trotter_graph = self.build_trotter_graph(time, trotter_steps, order)
-        
-        # Convert to tensor network
-        try:
-            tensor_network = to_quimb_tensor(trotter_graph)
-            
-            if not isinstance(tensor_network, qtn.TensorNetwork):
-                tensor_network = qtn.TensorNetwork([tensor_network])
-            
-            # Set up optimizer if needed
-            if optimize:
-                optimizer = ctg.HyperOptimizer(
-                    methods=['greedy', 'kahypar'],
-                    max_repeats=64,
-                    max_time=20,
-                    minimize='flops',
-                    progbar=False
-                )
-            else:
-                optimizer = None
-            
-            # Contract tensor network
-            output_indices = tensor_network.outer_inds()
-            
-            if optimize and optimizer is not None:
-                result = tensor_network.contract(
-                    all, optimize=optimizer, output_inds=output_indices
-                )
-            else:
-                result = tensor_network.contract(all, output_inds=output_indices)
-            
-            # Extract data
-            if hasattr(result, 'data'):
-                result_data = result.data
-            else:
-                result_data = result
-            
-            matrix_size = 2 ** self.total_qubits
-            expected_dims = 2 * self.total_qubits
-            
-            # Check if we have extra dimensions
-            if result_data.ndim > 2 and all(d == 2 for d in result_data.shape):
-                n_dims = len(result_data.shape)
-                
-                if n_dims > expected_dims:
-                    # Have extra dimensions - need to reshape and trace
-                    total_size = result_data.size
-                    sqrt_size = int(np.sqrt(total_size))
-                    
-                    if sqrt_size * sqrt_size == total_size:
-                        # Reshape to square matrix
-                        U_full = result_data.reshape(sqrt_size, sqrt_size)
-                        
-                        # Extract operator block for data qubits
-                        U = self.extract_operator_block(U_full, self.total_qubits)
-                        return U
-                    else:
-                        raise ValueError(
-                            f"Cannot reshape tensor with shape {result_data.shape} "
-                            f"to square matrix. Total size: {total_size}"
-                        )
-                else:
-                    # Normal case - reshape directly
-                    final_matrix = result_data.reshape(matrix_size, matrix_size)
-                    return final_matrix
-            else:
-                # Already 2D or 1D - reshape normally
-                if result_data.size == matrix_size * matrix_size:
-                    return result_data.reshape(matrix_size, matrix_size)
-                else:
-                    raise ValueError(
-                        f"Cannot reshape result with size {result_data.size} "
-                        f"to ({matrix_size}, {matrix_size}) matrix"
-                    )
-            
-        except Exception as e:
-            print(f"Error in Trotter ZX computation with trace: {e}")
-            print("Falling back to standard matrix exponentiation...")
-            return self.time_evolution(time, optimize=optimize)
     
     def evolve_density_matrix(
         self,
@@ -1681,8 +1284,6 @@ def compute_F_jk(
                         f_theta = 1.0 / 3.0
                     else:
                         raise ValueError(f"Unknown dipole_orientation: {dipole_orientation}")
-                    
-                    # Compute F_jk with orientation factor (equation 5)
                     F[j, k] = (3/2) * decay_rate * f_theta * (
                         term1 + term2 - term3
                     )
