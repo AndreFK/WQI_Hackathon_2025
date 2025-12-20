@@ -195,8 +195,8 @@ def create_equation4_hamiltonian(
             if j != k:  
                 f_jk = F_matrix[j, k]
                 #1/2 COMES From H_JK DECOMPOSITION of H_jk = F_jk sigma_
-                pauli_strings.append(( 2*f_jk , [f"X{j}", f"X{k}"])) 
-                pauli_strings.append((-2*f_jk, [f"Y{j}", f"Y{k}"]))
+                pauli_strings.append(( f_jk , [f"X{j}", f"X{k}"])) 
+                pauli_strings.append(( f_jk, [f"Y{j}", f"Y{k}"]))
     
     gamma_diag = -1j * 1.0 / 2  # Decay rate for diagonal terms
     diag = []

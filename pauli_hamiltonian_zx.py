@@ -82,7 +82,7 @@ class PauliHamiltonianZX:
         current_row = 1
         z_vertices_to_connect = []
         zs=[]
-        current_row = 1  # Start adding operations from row 1
+        current_row = 1  
         z_vertices_to_connect = []
         for term in self.pauli_strings:
             phase = term[0]
