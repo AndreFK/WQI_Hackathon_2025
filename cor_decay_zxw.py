@@ -108,7 +108,7 @@ def compute_F_jk_equation5(
     omega_prop= 10000.0
 ) -> np.ndarray:
     """
-    Compute F_jk coupling matrix using equation 5 from paper 2408.
+    Compute F_jk coupling matrix using equation 5 from paper 24.08.
     
     Equation 5: F_jk = F_kj = - (i Γ / 2) (3 / (8π)) [4π(1 - cos²θ_jk) (sin(k_a r_jk) / (k_a r_jk)) 
                 + 4π(1 - 3 cos²θ_jk) ((cos(k_a r_jk) / (k_a r_jk)²) - (sin(k_a r_jk) / (k_a r_jk)³))]
@@ -136,15 +136,16 @@ def compute_F_jk_equation5(
     omega_a = 0 #Only interested in decay part
     for j in range(N):
         for k in range(j,N):
-            # if j == k:
-            #     F[j, k] = omega_a-1j*gam/2  # No self-coupling in off-diagonal part
             if j != k:
                 # Compute distance components
-                dz = z[j] - z[k]
+
+                # TODO: Make this better
+                
+                dz = z[j] - z[k] 
                 dy = y[j] - y[k]
                 dx = x[j] - x[k]
-                r_jk = np.sqrt(dx**2 + dy**2 + dz**2)
                 
+                r_jk = np.sqrt(dx**2 + dy**2 + dz**2)
                 
                 cos_theta_jk = dz / r_jk
                 k_a_r_jk = k_a * r_jk
@@ -195,8 +196,8 @@ def create_equation4_hamiltonian(
             if j != k:  
                 f_jk = F_matrix[j, k]
                 #1/2 COMES From H_JK DECOMPOSITION of H_jk = F_jk sigma_
-                pauli_strings.append(( f_jk , [f"X{j}", f"X{k}"])) 
-                pauli_strings.append(( f_jk, [f"Y{j}", f"Y{k}"]))
+                pauli_strings.append((f_jk/2, [f"X{j}", f"X{k}"])) 
+                pauli_strings.append((f_jk/2, [f"Y{j}", f"Y{k}"]))
     
     gamma_diag = -1j * 1.0 / 2  # Decay rate for diagonal terms
     diag = []

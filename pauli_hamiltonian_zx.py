@@ -1219,7 +1219,7 @@ def compute_F_jk(
     - 'perpendicular': f(θ) = 1/2 * [1 - (d̂·r̂)^2] = 1/2 (when dipoles perpendicular to r)
     - 'isotropic': f(θ) = (1/3) * [1 - 3*(d̂·r̂)^2] averaged over orientations
     
-    For isotropic dipoles (randomly oriented), the angular average gives:
+    For isotropic dipoles (randomly oriented in any direction), the angular average gives:
     F_jk = (3/2) * Γ * [sin(kr)/(kr) + cos(kr)/(kr)^2 - sin(kr)/(kr)^3] * (1/3)
     
     Args:
