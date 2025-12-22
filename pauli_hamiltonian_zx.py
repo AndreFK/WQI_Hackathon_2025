@@ -211,7 +211,7 @@ class PauliHamiltonianZX:
         for z in self.zs:
             zx.utils.set_z_box_label(graphToAppend, z, 0)
             graphToAppend.set_type(z, zx.VertexType.Z)
-            graphToAppend.set_phase(z, graphToAppend.phase(z) * time / (steps))
+            graphToAppend.set_phase(z, -graphToAppend.phase(z) * time / (steps))
 
             #print(graphToAppend.phase(z))
             

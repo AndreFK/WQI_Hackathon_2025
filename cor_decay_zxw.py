@@ -133,7 +133,6 @@ def compute_F_jk_equation5(
     F = np.zeros((N, N), dtype=complex)
     k_a = 2 * np.pi / lambda_val  # Wavevector magnitude, may need to be a vector
     omega_a = omega_prop/ gam  # Angular frequency (not used here)
-    omega_a = 0 #Only interested in decay part
     for j in range(N):
         for k in range(j,N):
             if j != k:
@@ -191,20 +190,17 @@ def create_equation4_hamiltonian(
     
     # For equation 4, we only include off-diagonal terms (j != k)
     # The decomposition is: (F_jk/2) * (X_j X_k - Y_j Y_k)
+    gamma_diag = -1j * 1.0 / 2
     for j in range(num_atoms):
         for k in range(j, num_atoms):
             if j != k:  
                 f_jk = F_matrix[j, k]
                 #1/2 COMES From H_JK DECOMPOSITION of H_jk = F_jk sigma_
-                pauli_strings.append((f_jk/2, [f"X{j}", f"X{k}"])) 
-                pauli_strings.append((f_jk/2, [f"Y{j}", f"Y{k}"]))
-    
-    gamma_diag = -1j * 1.0 / 2  # Decay rate for diagonal terms
-    diag = []
+                pauli_strings.append((-f_jk/2, [f"X{j}", f"X{k}"])) 
+                pauli_strings.append((-f_jk/2, [f"Y{j}", f"Y{k}"]))
+            elif j == k:
+                pauli_strings.append((gamma_diag, [f"Z{j}"]))  # Diagonal terms are zero in off-diagonal part
 
-    for j in range(num_atoms):
-        diag.append(f"Z{j}")
-    pauli_strings.append((gamma_diag, diag))
     return pauli_strings
 
 
