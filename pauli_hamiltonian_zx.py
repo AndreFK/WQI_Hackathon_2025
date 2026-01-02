@@ -113,7 +113,7 @@ class PauliHamiltonianZX:
                 elif gate_type == 'Y':
                     x_vertex_one = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row, phase=pi_over_2)
                     z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row + 1)
-                    x_vertex_two = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row + 2, phase=pi_over_2)
+                    x_vertex_two = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row + 2, phase=-pi_over_2)
                 
                     main_graph.add_edge((x_vertex_one, z_vertex))
                     main_graph.add_edge((z_vertex, x_vertex_two))

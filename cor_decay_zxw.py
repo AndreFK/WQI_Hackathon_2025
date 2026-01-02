@@ -158,7 +158,7 @@ def compute_F_jk_equation5(
                 term2 = (1 - 3 * cos_theta_jk**2) * (cos_kr / (k_a_r_jk**2) - sin_kr / (k_a_r_jk**3))
                 
                 # Equation 5: F_jk = - (i Γ / 2) (3/2) * (term1 + term2)
-                F[j, k] = -(1j * gam / 2) * (3/2) * (term1 + term2)
+                F[j, k] = -(3j * gam / 4) * (term1 + term2)
                 F[k, j] = F[j, k]  # F_jk = F_kj (symmetric)
     F = F
     return F
@@ -196,8 +196,8 @@ def create_equation4_hamiltonian(
             if j != k:  
                 f_jk = F_matrix[j, k]
                 #1/2 COMES From H_JK DECOMPOSITION of H_jk = F_jk sigma_
-                pauli_strings.append((-f_jk/2, [f"X{j}", f"X{k}"])) 
-                pauli_strings.append((-f_jk/2, [f"Y{j}", f"Y{k}"]))
+                pauli_strings.append((f_jk/2, [f"X{j}", f"X{k}"])) 
+                pauli_strings.append((f_jk/2, [f"Y{j}", f"Y{k}"]))
             elif j == k:
                 pauli_strings.append((gamma_diag, [f"Z{j}"]))  # Diagonal terms are zero in off-diagonal part
 
