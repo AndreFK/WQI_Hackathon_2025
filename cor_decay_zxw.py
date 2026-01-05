@@ -167,7 +167,7 @@ def compute_F_jk_equation5(
 def create_equation4_hamiltonian(
     num_atoms: int,
     F_matrix: np.ndarray,
-    # gamma: float = 1.0
+    gamma: float = 1.0
 ) -> List[Tuple[float, List[str]]]:
     """
     Create Hamiltonian for equation 4 from paper 2408 (off-diagonal part only).
@@ -189,8 +189,8 @@ def create_equation4_hamiltonian(
     pauli_strings = []
     
     # For equation 4, we only include off-diagonal terms (j != k)
-    # The decomposition is: (F_jk/2) * (X_j X_k - Y_j Y_k)
-    gamma_diag = -1j * 1.0 / 2
+    # The decomposition is: (F_jk/2) * (X_j X_k + Y_j Y_k)
+    gamma_diag = -1j * gamma * 1.0 / 2
     for j in range(num_atoms):
         for k in range(j, num_atoms):
             if j != k:  
@@ -199,7 +199,8 @@ def create_equation4_hamiltonian(
                 pauli_strings.append((f_jk/2, [f"X{j}", f"X{k}"])) 
                 pauli_strings.append((f_jk/2, [f"Y{j}", f"Y{k}"]))
             elif j == k:
-                pauli_strings.append((gamma_diag, [f"Z{j}"]))  # Diagonal terms are zero in off-diagonal part
+                pauli_strings.append((gamma_diag, [f"Z{j}"]))
+                # Diagonal terms are zero in off-diagonal part
 
     return pauli_strings
 

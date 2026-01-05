@@ -88,15 +88,19 @@ class PauliHamiltonianZX:
             phase = term[0]
             gates = term[1]
             curr_list = []
+            row_increment = 0
+            first_qubit_index = 0
             for gate in gates:
                 gate_type = gate[0]
                 qubit_index = int(gate[1:])
+
+                if qubit_index != first_qubit_index:
+                    row_increment = 0
                 
-                row_increment = 0
-                
+
                 if gate_type == 'X':
-                    first_hadamard = main_graph.add_vertex(zx.VertexType.H_BOX, qubit=qubit_index, row=current_row)
-                    z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row + 1)
+                    first_hadamard = main_graph.add_vertex(zx.VertexType.H_BOX, qubit=qubit_index, row=current_row+row_increment)
+                    z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row + 1+row_increment)
                     second_hadamard = main_graph.add_vertex(zx.VertexType.H_BOX, qubit=qubit_index, row=current_row + 2)
 
                     main_graph.add_edge((first_hadamard, z_vertex))
@@ -111,9 +115,9 @@ class PauliHamiltonianZX:
                     
                     curr_list.append(z_vertex)
                 elif gate_type == 'Y':
-                    x_vertex_one = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row, phase=pi_over_2)
-                    z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row + 1)
-                    x_vertex_two = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row + 2, phase=-pi_over_2)
+                    x_vertex_one = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row+row_increment, phase=pi_over_2)
+                    z_vertex = main_graph.add_vertex(zx.VertexType.Z, qubit=qubit_index, row=current_row + 1+row_increment)
+                    x_vertex_two = main_graph.add_vertex(zx.VertexType.X, qubit=qubit_index, row=current_row + 2+row_increment, phase=-pi_over_2)
                 
                     main_graph.add_edge((x_vertex_one, z_vertex))
                     main_graph.add_edge((z_vertex, x_vertex_two))
@@ -221,9 +225,6 @@ class PauliHamiltonianZX:
         for i in range(steps-1):
             appended_graph = self._compose_graphs(graphToAppend, appended_graph)
 
-        # Add each Pauli term as a single term exponential
-        
-        
         return appended_graph
 
     def _build_top_graph(self) -> Tuple[zx.Graph, List[int]]:
@@ -642,32 +643,33 @@ class PauliHamiltonianZX:
         
         return composed, vertex_map1, vertex_map2
     
-    def time_evolution_numpy(self, time: float, optimize: bool = True) -> np.ndarray:
-        """
-        Compute the time evolution operator exp(-iHt).
+    # ""def time_evolution_numpy(self, time: float, optimize: bool = True) -> np.ndarray:
+    #     """
+    #     Compute the time evolution operator exp(-iHt).
         
-        This implements the exponentiation method from the paper.
-        For Trotter expansion in ZX, use time_evolution_trotter() instead.
+    #     This implements the exponentiation method from the paper.
+    #     For Trotter expansion in ZX, use time_evolution_trotter() instead.
         
-        Args:
-            time: Evolution time
-            optimize: Whether to use cotengra optimization
+    #     Args:
+    #         time: Evolution time
+    #         optimize: Whether to use cotengra optimization
             
-        Returns:
-            Time evolution operator as a matrix
-        """
-        # Get the Hamiltonian matrix
-        H = self.compute_matrix(optimize=optimize)
+    #     Returns:
+    #         Time evolution operator as a matrix
+    #     """
+    #     # Get the Hamiltonian matrix
+    #     H = self.compute_matrix(optimize=optimize)
+
+        # TODO: ?!?!
+    #     # Make it Hermitian if needed
+    #     if not np.allclose(H, H.conj().T):
+    #         H = (H + H.conj().T) / 2
         
-        # Make it Hermitian if needed
-        if not np.allclose(H, H.conj().T):
-            H = (H + H.conj().T) / 2
+    #     # Compute exp(-iHt) using scipy
+    #     from scipy.linalg import expm
+    #     U = expm(-1j * time * H)
         
-        # Compute exp(-iHt) using scipy
-        from scipy.linalg import expm
-        U = expm(-1j * time * H)
-        
-        return U
+    #     return U""
     
     def evolve_state(self, initial_state: np.ndarray, time: float) -> np.ndarray:
         """
