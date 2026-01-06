@@ -19,6 +19,7 @@ References:
 """
 
 import pyzx as zx
+from pyzx.symbolic import new_var, Poly
 import sympy as sp
 import numpy as np
 from typing import List, Tuple, Optional, Union, Dict
@@ -52,6 +53,8 @@ class PauliHamiltonianZX:
         self.optimizer = None
         self.x_input_vertex = None
         self.zs = None
+        self.trotter = None
+        self.trotter_steps = 0
         
     def _compute_total_qubits(self) -> int:
         """Compute the total number of qubits needed."""
@@ -195,7 +198,6 @@ class PauliHamiltonianZX:
     def build_trotter_graph(self, time: float, steps: int) -> zx.Graph:
         """
         Build the Trotterized ZX graph for time evolution.
-        
         Args:
             time: Evolution time
         Returns:
@@ -206,26 +208,80 @@ class PauliHamiltonianZX:
             self.main_graph = self._build_main_graph()
         
         # Create the Trotterized graph
+
+        for z in self.zs:
+            # 1. EXTRACT: Save the weight while it is still a box/labeled node
+            weight = graphToAppend.phase(z)
+
+            # 2. TRANSFORM: Convert to Z-spider
+            zx.utils.set_z_box_label(graphToAppend, z, 0) 
+            graphToAppend.set_type(z, zx.VertexType.Z)
+
+            # 3. LOAD: Now that it is a Z-spider, it accepts a phase (and Poly objects)
+            symbolic_phase = -weight * t / self.trotter_steps
+            graphToAppend.set_phase(z, symbolic_phase)
         
+        appended_graph = graphToAppend.copy()
+        for i in range(steps-1):
+            appended_graph = self._compose_graphs(appended_graph, graphToAppend.copy())
+        return appended_graph
+    
+
+    def build_trotter_graph_symbolic(self, time: float, steps: int) -> zx.Graph:
+        """
+        Build the Trotterized ZX graph for time evolution.
+        Args:
+            time: Evolution time
+        Returns:
+            ZX graph representing the Trotterized Hamiltonian
+        """
+        # Build the main graph first
+        if self.main_graph is None:
+            self.main_graph = self._build_main_graph()
+        
+        # Create the Trotterized graph
+
         # Add input boundaries
         inps = []
         appended_graph = None
         
-        graphToAppend = self.main_graph.copy()
-        for z in self.zs:
-            zx.utils.set_z_box_label(graphToAppend, z, 0)
-            graphToAppend.set_type(z, zx.VertexType.Z)
-            graphToAppend.set_phase(z, -graphToAppend.phase(z) * time / (steps))
-
-            #print(graphToAppend.phase(z))
-            
-            # Build the single term exponential graph
         
-        appended_graph = graphToAppend
+        if (self.trotter is None) or (self.trotter_steps != steps):
+            self.trotter = self.build_single_trotter_symbolic(steps)
+
+
+        appended_graph = self.trotter.copy()
         for i in range(steps-1):
-            appended_graph = self._compose_graphs(graphToAppend, appended_graph)
+            appended_graph = self._compose_graphs(self.trotter.copy(), appended_graph)
 
         return appended_graph
+    
+    def build_single_trotter_symbolic(self, steps: int) -> zx.Graph:
+        """
+        Returns a symbolic ZX graph where 't' is a variable.
+        """
+        # 1. Create the symbolic variable 't'
+        t = new_var('t', 'continuous')
+        
+        graphToAppend = self.main_graph.copy()
+        self.trotter_steps = steps
+        for z in self.zs:
+            # 1. EXTRACT: Save the weight while it is still a box/labeled node
+            weight = graphToAppend.phase(z)
+
+            # 2. TRANSFORM: Convert to Z-spider
+            zx.utils.set_z_box_label(graphToAppend, z, 0) 
+            graphToAppend.set_type(z, zx.VertexType.Z)
+
+            # 3. LOAD: Now that it is a Z-spider, it accepts a phase (and Poly objects)
+            symbolic_phase = -weight * t / self.trotter_steps
+            graphToAppend.set_phase(z, symbolic_phase)
+        
+
+
+        
+        return graphToAppend
+
 
     def _build_top_graph(self) -> Tuple[zx.Graph, List[int]]:
         """
@@ -643,7 +699,7 @@ class PauliHamiltonianZX:
         
         return composed, vertex_map1, vertex_map2
     
-    # ""def time_evolution_numpy(self, time: float, optimize: bool = True) -> np.ndarray:
+    # def time_evolution_numpy(self, time: float, optimize: bool = True) -> np.ndarray:
     #     """
     #     Compute the time evolution operator exp(-iHt).
         
@@ -660,7 +716,7 @@ class PauliHamiltonianZX:
     #     # Get the Hamiltonian matrix
     #     H = self.compute_matrix(optimize=optimize)
 
-        # TODO: ?!?!
+    # TODO: ?!?!
     #     # Make it Hermitian if needed
     #     if not np.allclose(H, H.conj().T):
     #         H = (H + H.conj().T) / 2
