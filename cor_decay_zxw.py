@@ -175,9 +175,9 @@ def create_equation4_hamiltonian(
     Equation 4: Ĥ^jk = F_jk σ̂_+^j σ̂_-^k + F_kj σ̂_-^j σ̂_+^k
     
     This decomposes into Pauli strings as:
-    (F_jk/2) * (X_j X_k - Y_j Y_k)
+    (F_jk/2) * (X_j X_k + Y_j Y_k)
     
-    Note: This is MINUS Y_j Y_k, not PLUS (different from subradiance case).
+    Note: This is PLUS Y_j Y_k, not MINUS (different from subradiance case).
     
     Args:
         num_atoms: Number of atoms
@@ -190,18 +190,23 @@ def create_equation4_hamiltonian(
     
     # For equation 4, we only include off-diagonal terms (j != k)
     # The decomposition is: (F_jk/2) * (X_j X_k + Y_j Y_k)
-    gamma_diag = -1j * gamma * 1.0 / 2
+    gamma_diag = -1j * gamma * 1.0 / (2*np.pi)
     for j in range(num_atoms):
         for k in range(j, num_atoms):
             if j != k:  
-                f_jk = F_matrix[j, k]
-                #1/2 COMES From H_JK DECOMPOSITION of H_jk = F_jk sigma_
+                f_jk = F_matrix[j, k] / np.pi
+                # 1/2 COMES From H_JK DECOMPOSITION of H_jk = F_jk sigma_
                 pauli_strings.append((f_jk/2, [f"X{j}", f"X{k}"])) 
                 pauli_strings.append((f_jk/2, [f"Y{j}", f"Y{k}"]))
-            elif j == k:
-                pauli_strings.append((gamma_diag, [f"Z{j}"]))
-                # Diagonal terms are zero in off-diagonal part
+                
+    for j in range(num_atoms):
+        # Add diagonal decay terms: -i (Γ/2) σ̂_+^j σ̂_-^j = -i (Γ/4) (I - Z_j)
+        
+        #TODO: add handling of constant term in pauli_hamiltonian_zx.py
 
+        # pauli_strings.append((gamma_diag / 2, [f"I"]))  # Constant term
+
+        pauli_strings.append((gamma_diag, [f"Z{j}"]))  # Z term
     return pauli_strings
 
 
@@ -276,58 +281,3 @@ def setup_positions_2d_grid(N: int, m: float = 1.5, lambda_val: float = 1.0) -> 
             index += 1
     
     return x, y, z
-
-
-def compute_equation4_eigenvalues(
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    lambda_val: float,
-    gam: float,
-    use_zxw: bool = True
-) -> np.ndarray:
-    """
-    Compute eigenvalues of the off-diagonal Hamiltonian from equation 4.
-    
-    Equation 4: Ĥ^jk = F_jk σ̂_+^j σ̂_-^k + F_kj σ̂_-^j σ̂_+^k
-    Decomposes as: (F_jk/2) * (X_j X_k - Y_j Y_k)
-    
-    Args:
-        x: Array of x coordinates (N,)
-        y: Array of y coordinates (N,)
-        z: Array of z coordinates (N,)
-        lambda_val: Wavelength
-        gam: Decay rate Γ
-        use_zxw: If True, use ZXW method; if False, use direct numpy
-        
-    Returns:
-        Array of eigenvalues
-    """
-    N = len(x)
-    
-    # Compute F_jk matrix using equation 5
-    F_matrix = compute_F_jk_equation5(x, y, z, lambda_val, gam, N)
-    
-    if use_zxw:
-        if PauliHamiltonianZX is None:
-            raise ImportError("ZXW functions not available. Install required packages.")
-        
-        # Create Pauli string Hamiltonian for equation 4
-        pauli_strings = create_equation4_hamiltonian(N, F_matrix)
-        
-        # Create ZXW Hamiltonian
-        hamiltonian_zxw = PauliHamiltonianZX(pauli_strings)
-        
-        # Compute eigenvalues
-        eigenvalues = hamiltonian_zxw.compute_eigenvalues(hermitian=True)
-    else:
-        # Direct numpy computation
-        # Build the Hamiltonian matrix directly
-        H = np.zeros((2**N, 2**N), dtype=complex)
-        
-        # This would require building the full 2^N dimensional matrix
-        # For now, we'll use ZXW method
-        raise NotImplementedError("Direct numpy method not implemented for equation 4. Use use_zxw=True.")
-    
-    return eigenvalues
-
