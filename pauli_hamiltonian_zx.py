@@ -213,10 +213,19 @@ class PauliHamiltonianZX:
             graphToAppend.set_type(z, zx.VertexType.Z)
             fractional_phase = -weight * time / steps
             graphToAppend.set_phase(z, fractional_phase)
+            #get edges connected to z
+            edges = graphToAppend.edges(z)
+            for e in edges:
+                graphToAppend.set_edge_type(e, zx.EdgeType.SIMPLE)
         
         appended_graph = graphToAppend.copy()
+        print(f"Building Trotter graph with {steps} steps.")
+        print(f"Scalar weight prior to Trotterization: {appended_graph.scalar}")
         for i in range(steps-1):
-            appended_graph.compose(graphToAppend.copy())
+            g = graphToAppend.copy()
+            appended_graph.compose(g)
+            print(f"After step {i+1}, scalar weight: {appended_graph.scalar}")
+             
         return appended_graph
     
     
@@ -349,7 +358,22 @@ class PauliHamiltonianZX:
             self.tot_graph.normalize()
         return self.tot_graph
     
-    
+    def _adjoint_(self, graph: zx.Graph) -> zx.Graph:
+        """
+        Compute the adjoint (conjugate transpose) of a graph.
+        Assumes all phases are real except for the z-nodes
+        Args:
+            graph: Input ZX graph
+            
+        Returns:
+            Adjoint ZX graph
+        """
+        adj_graph = graph.copy().adjoint()
+        for z in self.zs:
+            phase = adj_graph.phase(z)
+            adj_graph.set_phase(z, -phase)
+        return adj_graph
+
     def _compose_graphs(self, graph1: zx.Graph, graph2: zx.Graph) -> zx.Graph:
         """
         Compose two ZX graphs: graph1 @ graph2 (matrix multiplication).
